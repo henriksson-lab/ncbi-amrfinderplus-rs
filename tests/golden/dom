@@ -1,0 +1,24 @@
+#                                                                            --- full sequence --- -------------- this domain -------------   hmm coord   ali coord   env coord
+# target name        accession   tlen query name           accession   qlen   E-value  score  bias   #  of  c-Evalue  i-Evalue  score  bias  from    to  from    to  from    to  acc description of target
+#------------------- ---------- ----- -------------------- ---------- ----- --------- ------ ----- --- --- --------- --------- ------ ----- ----- ----- ----- ----- ----- ----- ---- ---------------------
+aph3pp-Ib_partial_5p_neg -            225 APH_3pp-NCBIFAM      NF032896.1   254  1.8e-116  387.2   0.4   1   1    2e-120    2e-116  387.0   0.4     1   205    21   225    21   225 1.00 NZ_QKNQ01000001.1 Providencia rettgeri strain Pret_2032, whole genome shotgun sequence  2160922-2162737  150-1527  704-137
+vanG                 -            349 D_ala_D_ser_VanG-NCBIFAM NF000091.3   344  2.1e-173  575.1   0.5   1   1  2.4e-177  2.4e-173  574.9   0.5     1   343     4   347     4   348 0.99 -
+nimIJ_hmm            -            166 NimIJ-NCBIFAM        NF000262.1   151   1.1e-82  274.7   0.3   1   1   1.2e-86   1.2e-82  274.5   0.3     1   151     4   154     4   154 1.00 WP_027455679.1 NimIJ family nitroimidazole resistance protein [Prevotella brevis]
+stxA2a_prot          -            319 Shig_StxA_2_acd-NCBIFAM NF041702.1   319  4.7e-228  754.6   7.7   1   1  5.2e-232  5.2e-228  754.5   7.7     1   319     1   319     1   319 1.00 EHY1938862.1 Shiga toxin Stx2a subunit A [Escherichia coli]
+stxA2a_prot          -            319 Shiga_Stx2A-NCBIFAM  NF033661.1   319  6.7e-215  711.2   7.1   1   1  7.5e-219  7.5e-215  711.1   7.1     1   319     1   319     1   319 1.00 EHY1938862.1 Shiga toxin Stx2a subunit A [Escherichia coli]
+stxB2a_prot          -             89 Shiga_Stx2B-NCBIFAM  NF033660.0    87   2.7e-60  199.5   1.0   1   1     3e-64     3e-60  199.4   1.0     1    87     1    87     1    87 1.00 EHY1938863.1 Shiga toxin Stx2a subunit B [Escherichia coli]
+blaPDC-114_blast     -            397 blaPDC-NCBIFAM       NF000422.6   397    3e-282  934.6   2.1   1   1  3.3e-286  3.3e-282  934.4   2.1     1   397     1   397     1   397 1.00 BLAST (100% length, but 1 mismatch)
+blaTEM-156           -            286 blaTEM-NCBIFAM       NF000531.2   286  3.6e-201  665.6   0.0   1   1    4e-205    4e-201  665.5   0.0     1   286     1   286     1   286 1.00 -
+blaTEM-156           -            286 bla_class_A-NCBIFAM  NF033103.1   257   1.4e-92  308.5   0.0   1   1   1.6e-96   1.6e-92  308.4   0.0     2   256    31   285    30   286 0.98 -
+blaPDC-114_blast     -            397 bla_class_C-NCBIFAM  NF033085.1   356  4.2e-163  541.3   0.0   1   1  4.8e-167  4.8e-163  541.1   0.0     2   355    32   386    31   387 0.99 BLAST (100% length, but 1 mismatch)
+blaOXA-436_partial   -            233 bla_class_D_main-NCBIFAM NF012161.0   236   3.9e-86  287.3   2.3   1   1   4.5e-90   4.5e-86  287.1   2.3     2   205    31   233    30   233 0.98 (Should be partial OXA-48 family
+#
+# Program:         hmmsearch
+# Version:         3.3.2 (Nov 2020)
+# Pipeline mode:   SEARCH
+# Query file:      /data/henriksson/github/claude/ncbi-amrfinderplus-rs/amrfinder_db/2026-03-24.1/AMR.LIB
+# Target file:     /data/henriksson/github/claude/ncbi-amrfinderplus-rs/amr/test_prot.fa
+# Option settings: hmmsearch --tblout /tmp/amr_test_fixtures/hmmsearch --domtblout /tmp/amr_test_fixtures/dom --noali --cut_tc -Z 10000 --cpu 5 /data/henriksson/github/claude/ncbi-amrfinderplus-rs/amrfinder_db/2026-03-24.1/AMR.LIB /data/henriksson/github/claude/ncbi-amrfinderplus-rs/amr/test_prot.fa 
+# Current dir:     /data/henriksson/github/claude/ncbi-amrfinderplus-rs/amr
+# Date:            Wed Apr  8 19:35:07 2026
+# [ok]

@@ -1,0 +1,29 @@
+[package]
+name = "amrfinder"
+version = "0.1.0"
+edition = "2021"
+description = "Rust implementation of NCBI AMRFinderPlus — antimicrobial resistance gene detection"
+license = "MIT"
+
+[[bin]]
+name = "amrfinder"
+path = "src/main.rs"
+
+[lib]
+name = "amrfinder"
+path = "src/lib.rs"
+
+[dependencies]
+blast-rs = { path = "/home/mahogny/github/claude/newblast" }
+hmmer-pure-rs = "0.4"
+ureq = "3"
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+noodles-fasta = "0.47"
+tempfile = "3"
+flate2 = "1"
+anyhow = "1"
+thiserror = "2"
+
+[build-dependencies]
+cc = "1"
