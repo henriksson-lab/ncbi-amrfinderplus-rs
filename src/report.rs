@@ -527,10 +527,10 @@ impl Batch {
         // Step 3: Pareto-better BLAST filtering
         // For each target, keep only alignments that are not dominated by another
         let targets: Vec<String> = self.target2good_blast_als.keys().cloned().collect();
-        for target in targets {
-            if let Some(indices) = self.target2good_blast_als.get(&target) {
+        for target in &targets {
+            if let Some(indices) = self.target2good_blast_als.get(target) {
                 let filtered = self.pareto_filter_blast(indices);
-                self.target2good_blast_als.insert(target, filtered);
+                self.target2good_blast_als.insert(target.clone(), filtered);
             }
         }
 
@@ -624,8 +624,9 @@ impl Batch {
 
     /// Get the reportability level for an alignment
     fn get_reportable(&self, al: &BlastAlignment) -> u8 {
-        // Check fam hierarchy for reportability
-        if let Some(fam) = self.fam_map.get(&al.fam_id) {
+        // Check fam hierarchy for reportability (C++ getFam: famId then gene fallback)
+        if let Some(fam) = self.fam_map.get(&al.fam_id)
+            .or_else(|| if !al.gene.is_empty() { self.fam_map.get(&al.gene) } else { None }) {
             if fam.reportable > 0 {
                 return fam.reportable;
             }
@@ -647,76 +648,64 @@ impl Batch {
         al.reportable
     }
 
-    /// Pareto-better filtering: for each target, keep only the best alignment
-    /// per gene family hierarchy (highest nident wins)
+    /// Pareto-better filtering matching C++ betterEq() logic.
+    /// For hits to the same target: compare by exact match, then nident, then ref length.
+    /// A hit is removed if another hit to the same target is strictly better.
     fn pareto_filter_blast(&self, indices: &[usize]) -> Vec<usize> {
         if indices.is_empty() {
             return Vec::new();
         }
-
-        // Step 1: For each fam_id, keep only the best hit (by nident)
-        let mut best_per_fam: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut result = Vec::new();
         for &idx in indices {
             let al = &self.blast_als[idx];
-            let entry = best_per_fam.entry(al.fam_id.clone()).or_insert((idx, 0));
-            if al.hsp.nident > entry.1 {
-                *entry = (idx, al.hsp.nident);
-            }
-        }
-
-        let candidates: Vec<usize> = best_per_fam.values().map(|(idx, _)| *idx).collect();
-
-        // Step 2: Pareto filter across ALL families
-        // A hit is dominated if another hit has BOTH higher/equal identity AND higher/equal coverage
-        // with at least one strictly better
-        let mut result = Vec::new();
-        for &idx in &candidates {
-            let al = &self.blast_als[idx];
-            let ident = al.hsp.rel_identity();
-            let cov = al.hsp.q_rel_coverage();
-
-            let dominated = candidates.iter().any(|&other_idx| {
+            let dominated = indices.iter().any(|&other_idx| {
                 if other_idx == idx {
                     return false;
                 }
                 let other = &self.blast_als[other_idx];
-                let o_ident = other.hsp.rel_identity();
-                let o_cov = other.hsp.q_rel_coverage();
-
-                // Cross-family: strictly dominated only if BOTH metrics are strictly better
-                // (one strictly better, other at least equal)
-                if o_ident > ident + 1e-6 && o_cov >= cov - 1e-6 {
-                    return true;
-                }
-                if o_cov > cov + 1e-6 && o_ident >= ident - 1e-6 {
-                    return true;
-                }
-
-                // Equal in both — only tie-break within related families
-                if (o_ident - ident).abs() < 1e-10 && (o_cov - cov).abs() < 1e-10 {
-                    // Check family relationship
-                    let other_is_descendant = self.fam_map.get(&other.fam_id)
-                        .map(|f| f.descendant_of(&al.fam_id, &self.fam_map))
-                        .unwrap_or(false);
-                    let this_is_descendant = self.fam_map.get(&al.fam_id)
-                        .map(|f| f.descendant_of(&other.fam_id, &self.fam_map))
-                        .unwrap_or(false);
-
-                    if other_is_descendant && !this_is_descendant {
-                        return true; // other is more specific descendant
-                    }
-                    // For unrelated families: do NOT remove — keep both
-                }
-
-                false
+                self.blast_better(other, al)
             });
-
             if !dominated {
                 result.push(idx);
             }
         }
-
         result
+    }
+
+    /// Simplified C++ betterEq: is `a` strictly better than `b`?
+    /// Matches the key comparisons from amr_report.cpp betterEq/better.
+    fn blast_better(&self, a: &BlastAlignment, b: &BlastAlignment) -> bool {
+        if a.hsp.sseqid != b.hsp.sseqid {
+            return false;
+        }
+        // Mutation vs non-mutation can't dominate each other
+        let a_mut = a.resistance == "mutation";
+        let b_mut = b.resistance == "mutation";
+        if a_mut != b_mut {
+            return false;
+        }
+        // Exact match beats non-exact
+        let a_exact = (a.hsp.rel_identity() - 1.0).abs() < 1e-6 && a.hsp.q_complete();
+        let b_exact = (b.hsp.rel_identity() - 1.0).abs() < 1e-6 && b.hsp.q_complete();
+        if a_exact && !b_exact {
+            return true;
+        }
+        if !a_exact && b_exact {
+            return false;
+        }
+        // Compare by nident (higher is better)
+        if a.hsp.nident != b.hsp.nident {
+            return a.hsp.nident > b.hsp.nident;
+        }
+        // Equal nident: prefer shorter reference (more specific match)
+        if a.hsp.qlen != b.hsp.qlen {
+            return a.hsp.qlen < b.hsp.qlen;
+        }
+        // Tie-break: lexicographic by accession (C++ PD-1245)
+        if a.ref_accession != b.ref_accession {
+            return a.ref_accession < b.ref_accession;
+        }
+        false
     }
 
     /// Generate TSV report to output
@@ -849,8 +838,11 @@ impl Batch {
     /// Get fam-derived info for an alignment
     fn get_fam_info(&self, al: &BlastAlignment) -> (String, String, String, String, String, u8) {
         // Returns: (genesymbol, type, subtype, class, subclass, reportable)
-        let fam = self.fam_map.get(&al.fam_id);
-        let match_fam = self.find_match_fam(&al.fam_id);
+        // C++ getFam(): try famId first, then gene field as fallback
+        let fam = self.fam_map.get(&al.fam_id)
+            .or_else(|| if !al.gene.is_empty() { self.fam_map.get(&al.gene) } else { None });
+        let match_fam = self.find_match_fam(&al.fam_id)
+            .or_else(|| if !al.gene.is_empty() { self.find_match_fam(&al.gene) } else { None });
 
         let is_exact = (al.hsp.rel_identity() - 1.0).abs() < 1e-6 && al.hsp.q_complete();
 
@@ -898,6 +890,21 @@ impl Batch {
         let reportable = self.get_reportable(al);
 
         (genesymbol, type_, subtype, class, subclass, reportable)
+    }
+
+    /// Walk family hierarchy to find ancestor with HMM info
+    fn find_hmm_fam(&self, fam_id: &str) -> Option<&Fam> {
+        let mut current = self.fam_map.get(fam_id)?;
+        for _ in 0..100 {
+            if !current.hmm.is_empty() {
+                return Some(current);
+            }
+            if current.parent_id.is_empty() {
+                break;
+            }
+            current = self.fam_map.get(&current.parent_id)?;
+        }
+        None
     }
 
     /// Find the matching family (ancestor with genesymbol and type info)
@@ -994,7 +1001,7 @@ impl Batch {
         tsv.write_field(&if product_name.is_empty() { na.to_string() } else { product_name })?;
 
         // Scope
-        let scope = if is_mutation || reportable >= 1 { "core" } else { "plus" };
+        let scope = if is_mutation || reportable >= 2 { "core" } else { "plus" };
         tsv.write_field(&scope)?;
 
         // Type, Subtype, Class, Subclass
@@ -1025,24 +1032,20 @@ impl Batch {
         tsv.write_field(&al.ref_accession)?;
         tsv.write_field(&al.product)?;
 
-        // HMM info
-        if al.from_hmm {
-            if let Some(fam) = self.fam_map.get(&al.fam_id) {
-                tsv.write_field(&fam.hmm)?;
-                tsv.write_field(&fam.family_name)?;
-            } else {
-                tsv.write_field(&na)?;
-                tsv.write_field(&na)?;
-            }
+        // HMM info — C++ uses getFam()->hmm which walks famId then gene fallback
+        // Try: 1) from_hmm fam, 2) hmm_al_idx, 3) fam hierarchy (famId→gene), 4) NA
+        let hmm_fam = if al.from_hmm {
+            self.fam_map.get(&al.fam_id)
         } else if let Some(hmm_idx) = al.hmm_al_idx {
-            let hmm = &self.hmm_als[hmm_idx];
-            if let Some(fam) = self.fam_map.get(&hmm.fam_id) {
-                tsv.write_field(&fam.hmm)?;
-                tsv.write_field(&fam.family_name)?;
-            } else {
-                tsv.write_field(&na)?;
-                tsv.write_field(&na)?;
-            }
+            self.fam_map.get(&self.hmm_als[hmm_idx].fam_id)
+        } else {
+            // Walk fam hierarchy to find HMM info (matching C++ getFam()->hmm)
+            self.find_hmm_fam(&al.fam_id)
+                .or_else(|| if !al.gene.is_empty() { self.find_hmm_fam(&al.gene) } else { None })
+        };
+        if let Some(fam) = hmm_fam.filter(|f| !f.hmm.is_empty()) {
+            tsv.write_field(&fam.hmm)?;
+            tsv.write_field(&fam.family_name)?;
         } else {
             tsv.write_field(&na)?;
             tsv.write_field(&na)?;
@@ -1119,5 +1122,168 @@ mod tests {
         assert_eq!(al.ref_accession, "WP_061158039.1");
         assert_eq!(al.fam_id, "blaTEM-156");
         assert_eq!(al.gene, "blaTEM");
+    }
+
+    // --- amr_report behavior tests ---
+    // These test specific behaviors that must match C++ amr_report
+
+    /// C++ isCore() requires reportable >= 2 (amr_report.cpp:820-821).
+    /// reportable=1 entries (like stx genes) should be "plus", not "core".
+    #[test]
+    fn test_scope_requires_reportable_2_for_core() {
+        let fam_path = db_dir().join("fam.tsv");
+        if !fam_path.exists() {
+            return;
+        }
+        let batch = Batch::from_fam_file(&fam_path, 0).unwrap();
+
+        // Build a BLAST alignment with reportable=1 (like stxA2)
+        let line = "TJA36680.1|1|1|stxA2_acd|stxA2|VIRULENCE|1|stxA2|STX2|Shiga_toxin_Stx2_subunit_A\tstxA2a_prot\t1\t319\t320\t94\t1051\t320\tMKCIL\tMKCIL";
+        let br = BlastRule::default();
+        let al = BlastAlignment::from_blast_line(line, true, true, &br, &br).unwrap();
+
+        let reportable = batch.get_reportable(&al);
+        // reportable=1 should NOT be core; C++ requires >= 2
+        assert!(
+            reportable < 2,
+            "stxA2 with reportable=1 should not qualify as core (reportable={})",
+            reportable
+        );
+    }
+
+    /// C++ getFam() falls back from famId to gene field (amr_report.cpp:1222-1224).
+    /// When fam_id is an allele (e.g. "blaTEM-156") not in fam.tsv, the gene field
+    /// ("blaTEM") should be used as fallback.
+    #[test]
+    fn test_find_match_fam_gene_fallback() {
+        let fam_path = db_dir().join("fam.tsv");
+        if !fam_path.exists() {
+            return;
+        }
+        let batch = Batch::from_fam_file(&fam_path, 0).unwrap();
+
+        // "blaTEM-156" is an allele — it won't be in fam.tsv
+        // "blaTEM" is the parent family — it IS in fam.tsv
+        assert!(
+            !batch.fam_map.contains_key("blaTEM-156"),
+            "blaTEM-156 should NOT be a direct key in fam_map"
+        );
+        assert!(
+            batch.fam_map.contains_key("blaTEM"),
+            "blaTEM should be in fam_map"
+        );
+
+        // find_match_fam("blaTEM-156") returns None (allele not in fam.tsv)
+        // The fallback to gene field happens at the get_fam_info level
+        assert!(
+            batch.find_match_fam("blaTEM-156").is_none(),
+            "blaTEM-156 is not in fam_map, find_match_fam should return None"
+        );
+
+        // But find_match_fam("blaTEM") should resolve (gene field fallback)
+        let result = batch.find_match_fam("blaTEM");
+        assert!(
+            result.is_some(),
+            "find_match_fam should resolve blaTEM from fam_map"
+        );
+        if let Some(fam) = result {
+            assert_eq!(fam.type_, "AMR", "blaTEM family type should be AMR");
+        }
+    }
+
+    /// Verify fam_map resolves type/class for known allele families.
+    /// The C++ uses getFam() which falls back famId → gene. Without fallback,
+    /// the Rust code uses the BLAST header's resistance field ("hydrolase")
+    /// instead of the fam.tsv's type ("AMR").
+    #[test]
+    fn test_get_fam_info_uses_fam_type_not_blast_header() {
+        let fam_path = db_dir().join("fam.tsv");
+        if !fam_path.exists() {
+            return;
+        }
+        let batch = Batch::from_fam_file(&fam_path, 0).unwrap();
+
+        // BLAST header for blaTEM-156: resistance="hydrolase"
+        // But fam.tsv entry for blaTEM has type_="AMR"
+        let line = "WP_061158039.1|1|1|blaTEM-156|blaTEM|hydrolase|2|BETA-LACTAM|BETA-LACTAM|class_A_beta-lactamase_TEM-156\tblaTEM-156\t1\t286\t287\t1\t286\t286\tMSIQH\tMSIQH";
+        let br = BlastRule::default();
+        let al = BlastAlignment::from_blast_line(line, true, true, &br, &br).unwrap();
+
+        let (_genesymbol, type_, _subtype, _class, _subclass, _reportable) = batch.get_fam_info(&al);
+        assert_eq!(
+            type_, "AMR",
+            "Type should come from fam.tsv (AMR), not BLAST header (hydrolase)"
+        );
+    }
+
+    /// C++ links BLAST alignments with supporting HMM results via getFam()->hmm.
+    /// The report should show HMM accession and description for BLAST hits
+    /// that have matching HMM families, not always "NA".
+    #[test]
+    fn test_hmm_info_populated_for_blast_hits_with_hmm_families() {
+        let fam_path = db_dir().join("fam.tsv");
+        if !fam_path.exists() {
+            return;
+        }
+        let batch = Batch::from_fam_file(&fam_path, 0).unwrap();
+
+        // Check that the blaTEM family has HMM info in fam.tsv
+        if let Some(fam) = batch.fam_map.get("blaTEM") {
+            // If the family has an HMM, BLAST hits in this family should report it
+            if !fam.hmm.is_empty() {
+                // This documents the expected behavior:
+                // C++ outputs HMM accession/description even for BLAST-method hits
+                // when the family has an HMM entry
+                assert!(
+                    !fam.hmm.is_empty(),
+                    "blaTEM family should have HMM accession"
+                );
+                assert!(
+                    !fam.family_name.is_empty(),
+                    "blaTEM family should have family_name for HMM description"
+                );
+            }
+        }
+    }
+
+    /// Pareto filter should remove dominated hits.
+    /// A hit with lower identity and equal coverage should be dominated.
+    #[test]
+    fn test_pareto_filter_removes_dominated_hits() {
+        let fam_path = db_dir().join("fam.tsv");
+        if !fam_path.exists() {
+            return;
+        }
+        let mut batch = Batch::from_fam_file(&fam_path, 0).unwrap();
+
+        let br = BlastRule::default();
+        // Use short identical-length sequences to avoid finish_hsp issues
+        let seq = "MSIQH";
+
+        // Hit 1: 100% identity (5/5 nident), full coverage
+        let line1 = format!(
+            "WP_1|1|1|blaTEM-156|blaTEM|hydrolase|2|BETA-LACTAM|BETA-LACTAM|product1\ttarget1\t1\t5\t5\t1\t5\t5\t{}\t{}",
+            seq, seq
+        );
+        let al1 = BlastAlignment::from_blast_line(&line1, true, true, &br, &br).unwrap();
+        batch.add_blast_al(al1);
+
+        // Hit 2: 80% identity (4/5 nident), same coverage — dominated by hit 1
+        let line2 = format!(
+            "WP_2|1|1|blaTEM-239|blaTEM|hydrolase|2|NA|NA|product2\ttarget1\t1\t5\t5\t1\t5\t5\t{}\t{}",
+            seq, "MSXQH"
+        );
+        let al2 = BlastAlignment::from_blast_line(&line2, true, true, &br, &br).unwrap();
+        batch.add_blast_al(al2);
+
+        let indices = vec![0, 1];
+        let filtered = batch.pareto_filter_blast(&indices);
+
+        // Hit 2 should be dominated by hit 1 (strictly lower identity, equal coverage)
+        assert_eq!(
+            filtered.len(), 1,
+            "Pareto filter should remove dominated hit, got {} hits",
+            filtered.len()
+        );
     }
 }

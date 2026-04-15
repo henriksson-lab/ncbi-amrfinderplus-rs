@@ -74,53 +74,6 @@ fn test_fasta_check_dna_golden() {
     );
 }
 
-// --- amrfinder protein test (C++ only for now, to verify test infrastructure) ---
-
-#[test]
-fn test_amrfinder_protein_cpp_matches_expected() {
-    let cpp_bin = cpp_binary("amrfinder");
-    let db_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amrfinder_db/2026-03-24.1");
-    let input = test_data_dir().join("test_prot.fa");
-    let gff = test_data_dir().join("test_prot.gff");
-    let expected = test_data_dir().join("test_prot.expected");
-
-    if !cpp_bin.exists() || !db_dir.exists() || !input.exists() {
-        return;
-    }
-
-    // Check if the database is indexed
-    if !db_dir.join("AMRProt.fa.phr").exists() {
-        return;
-    }
-
-    let output = Command::new(&cpp_bin)
-        .args([
-            "-p", input.to_str().unwrap(),
-            "-g", gff.to_str().unwrap(),
-            "-O", "Escherichia",
-            "--plus",
-            "--print_node",
-            "-d", db_dir.to_str().unwrap(),
-            "--threads", "6",
-        ])
-        .output()
-        .expect("C++ amrfinder failed");
-
-    if !output.status.success() {
-        eprintln!("C++ amrfinder stderr: {}", String::from_utf8_lossy(&output.stderr));
-        return; // Skip if C++ binary fails (missing deps etc.)
-    }
-
-    let actual = String::from_utf8_lossy(&output.stdout);
-    let expected_content = std::fs::read_to_string(&expected)
-        .expect("Failed to read expected file");
-
-    assert_eq!(
-        actual, expected_content,
-        "C++ amrfinder protein output doesn't match expected"
-    );
-}
-
 // --- Rust pipeline test ---
 
 #[test]
@@ -136,12 +89,6 @@ fn test_rust_pipeline_protein_matches_expected() {
 
     // Check if the database is indexed
     if !db_dir.join("AMRProt.fa.phr").exists() {
-        return;
-    }
-
-    // Check if C++ amr_report is available (we shell out to it)
-    let amr_report_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amr/amr_report");
-    if !amr_report_bin.exists() {
         return;
     }
 

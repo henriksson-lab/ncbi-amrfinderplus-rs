@@ -7,14 +7,17 @@ pub type Frame = i8;
 /// Strand: 1 (top/+), -1 (bottom/-), 0 (unknown)
 pub type Strand = i8;
 
+/// Returns true if `frame` is a valid reading frame (-3..=-1 or 1..=3).
 pub fn is_frame(frame: Frame) -> bool {
     (-3..=-1).contains(&frame) || (1..=3).contains(&frame)
 }
 
+/// Returns true if `strand` is a valid strand value (-1 or 1).
 pub fn is_strand(strand: Strand) -> bool {
     strand == -1 || strand == 1
 }
 
+/// Converts a strand value to '+', '-', or '?' for display.
 pub fn strand2char(strand: Strand) -> char {
     match strand {
         -1 => '-',
@@ -255,28 +258,43 @@ impl Disruption {
 // --- Hsp ---
 
 /// BLAST High Scoring Pair
+///
+/// Field naming convention (matching C++ AMRFinderPlus):
+/// - **q (query)** = the reference protein from the AMR database
+/// - **s (subject)** = the user's input sequence (protein or DNA)
+///
+/// This is the reverse of BLAST's own convention when using `-outfmt '6 sseqid qseqid ...'`
+/// (reverse format). The BLAST output columns are swapped so that when parsed left-to-right,
+/// field 1 becomes `qseqid` (reference) and field 2 becomes `sseqid` (user input).
+///
+/// - `qseqid` contains the reference accession (pipe-delimited metadata)
+/// - `sseqid` contains the user's protein/contig identifier
+/// - `qlen` = reference sequence length
+/// - `slen` = user's sequence length
+/// - `q_int` = alignment interval on the reference
+/// - `s_int` = alignment interval on the user's sequence
 #[derive(Debug, Clone)]
 pub struct Hsp {
     pub merged: bool,
 
     // Protein flags
-    pub q_prot: bool,
-    pub s_prot: bool,
-    pub a_prot: bool,
+    pub q_prot: bool,  // reference is protein
+    pub s_prot: bool,  // user input is protein (false for blastx/tblastn DNA)
+    pub a_prot: bool,  // alignment is in protein space
 
-    // Unit conversion factors
+    // Unit conversion factors (1 or 3 for protein-to-DNA)
     pub a2q: usize,
     pub a2s: usize,
 
-    // BLAST fields
-    pub qseqid: String,
-    pub sseqid: String,
-    pub q_int: Interval,
-    pub s_int: Interval,
-    pub qlen: usize,
-    pub slen: usize,
-    pub qseq: String,
-    pub sseq: String,
+    // BLAST fields — see struct doc for q/s convention
+    pub qseqid: String,  // reference identifier (pipe-delimited metadata)
+    pub sseqid: String,  // user's sequence identifier
+    pub q_int: Interval,  // alignment interval on reference
+    pub s_int: Interval,  // alignment interval on user's sequence
+    pub qlen: usize,      // reference sequence length
+    pub slen: usize,      // user's sequence length
+    pub qseq: String,     // aligned reference sequence (with gaps)
+    pub sseq: String,     // aligned user sequence (with gaps)
 
     // Computed by finish_hsp()
     pub length: usize,

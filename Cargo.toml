@@ -1,9 +1,14 @@
 [package]
-name = "amrfinder"
+name = "amrfinder-rs"
 version = "0.1.0"
 edition = "2021"
 description = "Rust implementation of NCBI AMRFinderPlus — antimicrobial resistance gene detection"
-license = "MIT"
+license-file = "LICENSE"
+repository = "https://github.com/henriksson-lab/ncbi-amrfinderplus-rs"
+readme = "README.md"
+keywords = ["bioinformatics", "amr", "antimicrobial-resistance", "blast", "genomics"]
+categories = ["science", "command-line-utilities"]
+exclude = ["amr", "amrfinder_db", "target", "CLAUDE.md"]
 
 [[bin]]
 name = "amrfinder"
@@ -14,16 +19,9 @@ name = "amrfinder"
 path = "src/lib.rs"
 
 [dependencies]
-blast-rs = { path = "/home/mahogny/github/claude/newblast" }
+blast-rs = "0.5"
 hmmer-pure-rs = "0.4"
 ureq = "3"
 clap = { version = "4", features = ["derive"] }
-rayon = "1"
-noodles-fasta = "0.47"
 tempfile = "3"
-flate2 = "1"
 anyhow = "1"
-thiserror = "2"
-
-[build-dependencies]
-cc = "1"

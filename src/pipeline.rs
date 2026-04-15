@@ -2,7 +2,6 @@
 // Coordinates BLAST, HMM, and report generation
 
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -128,28 +127,18 @@ pub fn run_pipeline(config: &PipelineConfig) -> Result<String> {
         // Run blastp and hmmsearch in parallel
         let hmmsearch_out = tmp.join("hmmsearch");
         let dom_out = tmp.join("dom");
-        let hmmsearch_prog = config.find_prog("hmmsearch");
-        let hmm_lib = format!("{}/AMR.LIB", db);
-        let hmm_cpu = config.threads.saturating_sub(1).to_string();
-        let prot_str = prot_path.to_str().unwrap().to_string();
-        let hmmsearch_out_str = hmmsearch_out.to_str().unwrap().to_string();
-        let dom_out_str = dom_out.to_str().unwrap().to_string();
+        let hmm_lib_path = PathBuf::from(format!("{}/AMR.LIB", db));
+        let prot_for_hmm = prot_path.clone();
+        let hmmsearch_out_clone = hmmsearch_out.clone();
+        let dom_out_clone = dom_out.clone();
 
         let hmm_handle = std::thread::spawn(move || {
-            Command::new(&hmmsearch_prog)
-                .args([
-                    "--tblout", &hmmsearch_out_str,
-                    "--noali",
-                    "--domtblout", &dom_out_str,
-                    "--cut_tc",
-                    "-Z", "10000",
-                    "--cpu", &hmm_cpu,
-                    &hmm_lib,
-                    &prot_str,
-                ])
-                .stderr(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .status()
+            crate::search::run_hmmsearch_library(
+                &hmm_lib_path,
+                &prot_for_hmm,
+                &hmmsearch_out_clone,
+                &dom_out_clone,
+            )
         });
 
         let blastp_output = Command::new(&blastp_prog)
@@ -175,10 +164,7 @@ pub fn run_pipeline(config: &PipelineConfig) -> Result<String> {
         }
 
         // Wait for hmmsearch
-        let hmm_result = hmm_handle.join().map_err(|_| anyhow::anyhow!("hmmsearch thread panicked"))??;
-        if !hmm_result.success() {
-            bail!("hmmsearch failed");
-        }
+        hmm_handle.join().map_err(|_| anyhow::anyhow!("hmmsearch thread panicked"))??;
 
         amr_report_blastp = format!(
             "-blastp {} -hmmsearch {} -hmmdom {}",
@@ -287,190 +273,50 @@ pub fn run_pipeline(config: &PipelineConfig) -> Result<String> {
 
         amr_report_blastx = format!("-blastx {}", blastx_out.to_str().unwrap());
 
-        // DNA mutation search (blastn)
-        if !config.organism.is_empty() {
+        // DNA mutation search (blastn) — run in parallel with blastx/tblastn
+        let blastn_handle = if !config.organism.is_empty() {
             let dna_db = format!("{}/AMR_DNA-{}.fa", db, config.organism);
             if Path::new(&dna_db).exists() {
                 let blastn_out = tmp.join("blastn");
                 let blastn_prog = config.find_prog("blastn");
+                let dna_str = dna_path.to_str().unwrap().to_string();
+                let blastn_out_str = blastn_out.to_str().unwrap().to_string();
+                // Use reverse format (sseqid qseqid) so reference is in qseqid
+                Some(std::thread::spawn(move || {
+                    Command::new(&blastn_prog)
+                        .args([
+                            "-query", &dna_str,
+                            "-db", &dna_db,
+                            "-evalue", "1e-20",
+                            "-dust", "no",
+                            "-max_target_seqs", "10000",
+                            "-outfmt", "6 sseqid qseqid sstart send slen qstart qend qlen sseq qseq",
+                            "-out", &blastn_out_str,
+                        ])
+                        .stderr(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .status()
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-                let blastn_status = Command::new(&blastn_prog)
-                    .args([
-                        "-query", dna_path.to_str().unwrap(),
-                        "-db", &dna_db,
-                        "-evalue", "1e-20",
-                        "-dust", "no",
-                        "-max_target_seqs", "10000",
-                        "-num_threads", &config.threads.to_string(),
-                        "-outfmt", "6 qseqid sseqid qstart qend qlen sstart send slen qseq sseq",
-                        "-out", blastn_out.to_str().unwrap(),
-                    ])
-                    .stderr(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .status()?;
-
-                if !blastn_status.success() {
-                    bail!("blastn failed");
-                }
+        // Wait for blastn if it was started
+        if let Some(handle) = blastn_handle {
+            let result = handle.join().map_err(|_| anyhow::anyhow!("blastn thread panicked"))??;
+            if !result.success() {
+                bail!("blastn failed");
             }
         }
     }
 
-    // Try C++ amr_report first; if not available, use Rust implementation
-    let amr_report_bin = which_amr_report();
+    // Run Rust amr_report + dna_mutation
+    let raw_result = run_rust_amr_report(config, tmp, &db, &amr_report_blastp, &amr_report_blastx)?;
 
-    if amr_report_bin.is_err() {
-        // C++ amr_report not available — use Rust implementation
-        let rust_result = run_rust_amr_report(config, tmp, &db, &amr_report_blastp, &amr_report_blastx)?;
-        let result = sort_tsv_output(&rust_result, config)?;
-        if let Some(ref output_path) = config.output {
-            fs::write(output_path, &result)?;
-        }
-        return Ok(result);
-    }
-
-    let amr_report_bin = amr_report_bin.unwrap();
-
-    let mut amr_report_args: Vec<String> = Vec::new();
-    amr_report_args.push("-fam".to_string());
-    amr_report_args.push(format!("{}/fam.tsv", db));
-
-    // Parse the accumulated args
-    for part in amr_report_blastp.split_whitespace() {
-        amr_report_args.push(part.to_string());
-    }
-    if !amr_report_blastx.is_empty() {
-        for part in amr_report_blastx.split_whitespace() {
-            amr_report_args.push(part.to_string());
-        }
-    }
-
-    // Add DNA length file if we have nucleotide input
-    if config.nucleotide.is_some() {
-        let len_file = tmp.join("len");
-        if len_file.exists() {
-            amr_report_args.extend([
-                "-dna_len".to_string(),
-                len_file.to_str().unwrap().to_string(),
-            ]);
-        }
-    }
-
-    amr_report_args.extend([
-        "-organism".to_string(), config.organism.clone(),
-        "-mutation".to_string(), format!("{}/AMRProt-mutation.tsv", db),
-        "-susceptible".to_string(), format!("{}/AMRProt-susceptible.tsv", db),
-    ]);
-
-    if !config.plus {
-        amr_report_args.push("-core".to_string());
-    }
-    if config.print_node {
-        amr_report_args.push("-print_node".to_string());
-    }
-    if config.ident_min >= 0.0 {
-        amr_report_args.extend([
-            "-ident_min".to_string(),
-            config.ident_min.to_string(),
-        ]);
-    }
-    amr_report_args.extend([
-        "-coverage_min".to_string(),
-        config.coverage_min.to_string(),
-    ]);
-    if !config.name.is_empty() {
-        amr_report_args.extend([
-            "-name".to_string(),
-            config.name.clone(),
-        ]);
-    }
-
-    // Suppress common proteins for organisms
-    let suppress_prot_file = tmp.join("suppress_prot");
-    if !config.organism.is_empty() {
-        let suppress_tsv = format!("{}/AMRProt-suppress.tsv", db);
-        if Path::new(&suppress_tsv).exists() {
-            let mut suppress_out = File::create(&suppress_prot_file)?;
-            let file = File::open(&suppress_tsv)?;
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = line?;
-                if line.starts_with('#') {
-                    continue;
-                }
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() >= 2 && fields[0] == config.organism {
-                    writeln!(suppress_out, "{}", fields[1])?;
-                }
-            }
-            drop(suppress_out);
-            amr_report_args.extend([
-                "-suppress_prot".to_string(),
-                suppress_prot_file.to_str().unwrap().to_string(),
-            ]);
-        }
-    }
-
-    // Force CDS report for DNA + organism combination
-    if config.nucleotide.is_some() && !config.organism.is_empty() {
-        amr_report_args.push("-force_cds_report".to_string());
-    }
-
-    let amr_report_output = Command::new(&amr_report_bin)
-        .args(&amr_report_args)
-        .output()?;
-
-    if !amr_report_output.status.success() {
-        let stderr = String::from_utf8_lossy(&amr_report_output.stderr);
-        bail!("amr_report failed: {}", stderr);
-    }
-
-    let mut raw_result = String::from_utf8(amr_report_output.stdout)?;
-
-    // Run dna_mutation for DNA SNP detection (blastn results)
-    if config.nucleotide.is_some() && !config.organism.is_empty() {
-        let blastn_file = tmp.join("blastn");
-        let dna_tsv = format!("{}/AMR_DNA-{}.tsv", db, config.organism);
-        if blastn_file.exists() && Path::new(&dna_tsv).exists() {
-            let dna_mutation_bin = which_binary("dna_mutation")?;
-            let mut dna_mut_args = vec![
-                blastn_file.to_str().unwrap().to_string(),
-                dna_tsv,
-                config.organism.clone(),
-            ];
-
-            if config.mutation_all.is_some() {
-                dna_mut_args.extend([
-                    "-mutation_all".to_string(),
-                    tmp.join("mutation_all.dna").to_str().unwrap().to_string(),
-                ]);
-            }
-
-            if !config.name.is_empty() {
-                dna_mut_args.extend(["-name".to_string(), config.name.clone()]);
-            }
-            if config.print_node {
-                dna_mut_args.push("-print_node".to_string());
-            }
-
-            let dna_mut_output = Command::new(&dna_mutation_bin)
-                .args(&dna_mut_args)
-                .output()?;
-
-            if dna_mut_output.status.success() {
-                let snp_output = String::from_utf8(dna_mut_output.stdout)?;
-                // Append SNP results (skip header line)
-                for (i, line) in snp_output.lines().enumerate() {
-                    if i > 0 && !line.is_empty() {
-                        raw_result.push_str(line);
-                        raw_result.push('\n');
-                    }
-                }
-            }
-        }
-    }
-
-    // Post-processing: sort by sort columns (matching C++ amrfinder.cpp behavior)
+    // Post-processing: sort by sort columns
     let result = sort_tsv_output(&raw_result, config)?;
 
     // Handle output
@@ -577,64 +423,6 @@ fn run_rust_amr_report(
     }
 
     Ok(raw_result)
-}
-
-/// Find a C++ binary (amr_report, dna_mutation, etc.)
-fn which_binary(name: &str) -> Result<PathBuf> {
-    // Look in the amr/ source directory
-    let amr_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amr").join(name);
-    if amr_dir.exists() {
-        return Ok(amr_dir);
-    }
-
-    // Look in the same directory as current executable
-    if let Ok(exe) = std::env::current_exe() {
-        let dir = exe.parent().unwrap_or(Path::new("."));
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    // Try PATH
-    let output = Command::new("which")
-        .arg(name)
-        .output()?;
-    if output.status.success() {
-        let path = String::from_utf8(output.stdout)?.trim().to_string();
-        return Ok(PathBuf::from(path));
-    }
-
-    bail!("{} binary not found", name);
-}
-
-/// Find the amr_report binary
-fn which_amr_report() -> Result<PathBuf> {
-    // Look in the same directory as the current executable
-    if let Ok(exe) = std::env::current_exe() {
-        let dir = exe.parent().unwrap_or(Path::new("."));
-        let candidate = dir.join("amr_report");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    // Look in the source amr/ directory
-    let amr_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amr/amr_report");
-    if amr_dir.exists() {
-        return Ok(amr_dir);
-    }
-
-    // Try PATH
-    let output = Command::new("which")
-        .arg("amr_report")
-        .output()?;
-    if output.status.success() {
-        let path = String::from_utf8(output.stdout)?.trim().to_string();
-        return Ok(PathBuf::from(path));
-    }
-
-    bail!("amr_report binary not found");
 }
 
 /// Sort the TSV output to match C++ amrfinder's post-processing

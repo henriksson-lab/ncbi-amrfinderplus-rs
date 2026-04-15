@@ -67,55 +67,67 @@ impl AmrMutation {
         )
     }
 
-    /// Parse gene_mutation_std into components
+    /// Parse gene_mutation_std into components.
+    ///
+    /// Format: `GENE_REF<pos>ALLELE[*frameshift_pos]`
+    /// Examples:
+    /// - `gyrA_S83L` → gene=gyrA, ref=S, pos=83, allele=L
+    /// - `blaTEMp_G162T` → gene=blaTEMp, ref=G, pos=162, allele=T
+    /// - `ampC_T-14TGT` → gene=ampC, ref=T, pos=-14, allele=TGT
+    /// - `nfsA_K141Ter` → gene=nfsA, ref=K, pos=141, allele=Ter (stop codon)
+    /// - `nfsA_R15C` → gene=nfsA, ref=R, pos=15, allele=C
     fn parse(gene_mutation_std: &str) -> (String, String, String, i32, usize, i32) {
-        // Format: GENE_REFposALLELE or GENE_REFposALLELE*frameshift_pos
-        // Simple parsing — the C++ version is more complex
         let mut reference = String::new();
         let mut allele = String::new();
         let mut gene = String::new();
         let mut pos_std: i32 = 0;
         let mut frameshift: usize = NO_INDEX;
-        let frameshift_insertion: i32 = 0;
+        let mut frameshift_insertion: i32 = 0;
 
         if let Some(underscore_pos) = gene_mutation_std.find(PM_DELIMITER) {
             gene = gene_mutation_std[..underscore_pos].to_string();
             let rest = &gene_mutation_std[underscore_pos + 1..];
+            let chars: Vec<char> = rest.chars().collect();
 
-            // Find where the reference sequence ends and position begins
-            let mut ref_end = 0;
-            for (i, c) in rest.chars().enumerate() {
-                if c.is_ascii_digit() || c == '-' {
-                    ref_end = i;
-                    break;
+            // Phase 1: Collect reference residues (uppercase letters at start)
+            let mut i = 0;
+            while i < chars.len() && chars[i].is_ascii_uppercase() {
+                reference.push(chars[i]);
+                i += 1;
+            }
+
+            // Phase 2: Collect position (digits and optional leading '-')
+            let pos_start = i;
+            if i < chars.len() && chars[i] == '-' {
+                i += 1; // negative position
+            }
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i > pos_start {
+                if let Ok(p) = rest[pos_start..i].parse::<i32>() {
+                    pos_std = p - 1; // Convert from 1-based to 0-based (matching C++)
                 }
             }
 
-            reference = rest[..ref_end].to_string();
-
-            // Find position
-            let mut pos_end = ref_end;
-            for (i, c) in rest[ref_end..].chars().enumerate() {
-                if !c.is_ascii_digit() && c != '-' {
-                    pos_end = ref_end + i;
-                    break;
-                }
-                pos_end = ref_end + i + 1;
-            }
-
-            if let Ok(p) = rest[ref_end..pos_end].parse::<i32>() {
-                pos_std = p - 1; // Convert from 1-based
-            }
-
-            // Remaining is the allele (possibly with frameshift info)
-            let allele_str = &rest[pos_end..];
-            if let Some(star_pos) = allele_str.find('*') {
-                allele = allele_str[..star_pos].to_string();
-                if let Ok(fs) = allele_str[star_pos + 1..].parse::<usize>() {
+            // Phase 3: Collect allele (remaining, possibly with * frameshift)
+            let allele_part = &rest[i..];
+            if let Some(star_pos) = allele_part.find('*') {
+                allele = allele_part[..star_pos].to_string();
+                // After * is frameshift position, possibly with +/- insertion count
+                let fs_part = &allele_part[star_pos + 1..];
+                if let Some(sign_pos) = fs_part.find(['+', '-']) {
+                    if let Ok(fs) = fs_part[..sign_pos].parse::<usize>() {
+                        frameshift = fs;
+                    }
+                    if let Ok(ins) = fs_part[sign_pos..].parse::<i32>() {
+                        frameshift_insertion = ins;
+                    }
+                } else if let Ok(fs) = fs_part.parse::<usize>() {
                     frameshift = fs;
                 }
             } else {
-                allele = allele_str.to_string();
+                allele = allele_part.to_string();
             }
         }
 
@@ -252,13 +264,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_amr_mutation_parse() {
-        let m = AmrMutation::new(100, "gyrA_S83L", "gyrA_S83L", "QUINOLONE", "FLUOROQUINOLONE", "Escherichia coli gyrA S83L");
+    fn test_amr_mutation_parse_simple() {
+        let m = AmrMutation::new(100, "gyrA_S83L", "gyrA_S83L", "QUINOLONE", "FLUOROQUINOLONE", "name");
         assert_eq!(m.gene, "gyrA");
         assert_eq!(m.reference, "S");
         assert_eq!(m.allele, "L");
-        assert_eq!(m.pos_std, 82); // 0-based
-        assert!(!m.empty());
+        assert_eq!(m.pos_std, 82); // 0-based: 83 - 1
+        assert_eq!(m.wildtype(), "gyrA_S83S"); // wildtype uses pos_std + 1
+    }
+
+    #[test]
+    fn test_amr_mutation_parse_negative_pos() {
+        let m = AmrMutation::new(40, "ampC_T-14TGT", "ampC_T-14TGT", "BETA-LACTAM", "CEPH", "name");
+        assert_eq!(m.gene, "ampC");
+        assert_eq!(m.reference, "T");
+        assert_eq!(m.allele, "TGT");
+        assert_eq!(m.pos_std, -15); // 0-based: -14 - 1
+    }
+
+    #[test]
+    fn test_amr_mutation_parse_stop_codon() {
+        let m = AmrMutation::new(141, "nfsA_K141Ter", "nfsA_K141Ter", "NITRO", "NITRO", "name");
+        assert_eq!(m.gene, "nfsA");
+        assert_eq!(m.reference, "K");
+        assert_eq!(m.allele, "Ter");
+        assert_eq!(m.pos_std, 140); // 0-based: 141 - 1
+    }
+
+    #[test]
+    fn test_amr_mutation_parse_promoter() {
+        let m = AmrMutation::new(162, "blaTEMp_G162T", "blaTEMp_G162T", "BL", "BL", "name");
+        assert_eq!(m.gene, "blaTEMp");
+        assert_eq!(m.reference, "G");
+        assert_eq!(m.allele, "T");
+        assert_eq!(m.pos_std, 161); // 0-based: 162 - 1
     }
 
     #[test]

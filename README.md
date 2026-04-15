@@ -2,6 +2,30 @@
 
 A Rust reimplementation of [NCBI AMRFinderPlus](https://github.com/ncbi/amr) (v4.2.7) for identifying antimicrobial resistance (AMR) genes and point mutations in bacterial protein and nucleotide sequences.
 
+
+## This is an LLM-mediated faithful (hopefully) translation, not the original code!
+
+Most users should probably first see if the existing original code works for them, unless they have reason otherwise. The original source
+may have newer features and it has had more love in terms of fixing bugs. In fact, we aim to replicate bugs if they are present, for the
+sake of reproducibility! (but then we might have added a few more in the process)
+
+There are however cases when you might prefer this Rust version. We generally agree with [this page](https://rewrites.bio/)
+but more specifically:
+* We have had many issues with ensuring that our software works using existing containers (Docker, PodMan, Singularity). One size does not fit all and it eats our resources trying to keep up with every way of delivering software
+* Common package managers do not work well. It was great when we had a few Linux distributions with stable procedures, but now there are just too many ecosystems (Homebrew, Conda). Conda has an NP-complete resolver which does not scale. Homebrew is only so-stable. And our dependencies in Python still break. These can no longer be considered professional serious options. Meanwhile, Cargo enables multiple versions of packages to be available, even within the same program(!)
+* The future is the web. We deploy software in the web browser, and until now that has meant Javascript. This is a language where even the == operator is broken. Typescript is one step up, but a game changer is the ability to compile Rust code into webassembly, enabling performance and sharing of code with the backend. Translating code to Rust enables new ways of deployment and running code in the browser has especial benefits for science - researchers do not have deep pockets to run servers, so pushing compute to the user enables deployment that otherwise would be impossible
+* Old CLI-based utilities are bad for the environment(!). A large amount of compute resources are spent creating and communicating via small files, which we can bypass by using code as libraries. Even better, we can avoid frequent reloading of databases by hoisting this stage, with up to 100x speedups in some cases. Less compute means faster compute and less electricity wasted
+* LLM-mediated translations may actually be safer to use than the original code. This article shows that [running the same code on different operating systems can give somewhat different answers](https://doi.org/10.1038/nbt.3820). This is a gap that Rust+Cargo can reduce. Typesafe interfaces also reduce coding mistakes and error handling, as opposed to typical command-line scripting
+
+But:
+
+* **This approach should still be considered experimental**. The LLM technology is immature and has sharp corners. But there are opportunities to reap, and the genie is not going back to the bottle. This translation is as much aimed to learn how to improve the technology and get feedback on the results.
+* Translations are not endorsed by the original authors unless otherwise noted. **Do not send bug reports to the original developers**. Use our Github issues page instead.
+* **Do not trust the benchmarks on this page**. They are used to help evaluate the translation. If you want improved performance, you generally have to use this code as a library, and use the additional tricks it offers. We generally accept performance losses in order to reduce our dependency issues
+* **Check the original Github pages for information about the package**. This README is kept sparse on purpose. It is not meant to be the primary source of information
+
+
+
 ## Features
 
 - **Protein analysis** -- BLASTP and HMM-based AMR gene detection
@@ -9,31 +33,35 @@ A Rust reimplementation of [NCBI AMRFinderPlus](https://github.com/ncbi/amr) (v4
 - **Point mutations** -- organism-specific resistance mutation detection (protein and DNA level)
 - **Library API** -- all functionality available as Rust library functions; no file I/O required
 - **Single binary** -- all tools consolidated into one binary with subcommands
-- **Pure Rust HMM** -- optional in-process HMM search via `hmmer-pure-rs` (no external hmmsearch needed)
+- **Pure Rust HMM** -- in-process HMM search via `hmmer-pure-rs` (no external hmmsearch needed)
 - **Parallel execution** -- BLAST and HMM searches run concurrently
 
 ## Installation
 
 ```bash
+# From crates.io
+cargo install amrfinder-rs
+
 # From source
-cargo install --path amrfinder
+cargo install --path .
 
 # Build with native CPU optimizations
-RUSTFLAGS="-C target-cpu=native" cargo install --path amrfinder
+RUSTFLAGS="-C target-cpu=native" cargo install --path .
 ```
 
 ### External dependencies
 
-The pipeline shells out to these tools (must be in `$PATH` or specified via `--blast_bin` / `--hmmer_bin`):
+HMM search uses the built-in pure Rust `hmmer-pure-rs` library (no external hmmsearch needed).
+
+The pipeline shells out to BLAST+ for sequence search (must be in `$PATH` or specified via `--blast_bin`):
 
 | Tool | Used for | Required? |
 |------|----------|-----------|
 | `blastp` | Protein-vs-protein search | Yes (protein input) |
 | `blastx` / `tblastn` | Translated nucleotide search | Yes (nucleotide input) |
 | `blastn` | DNA point mutation search | Only with `--organism` + nucleotide |
-| `hmmsearch` | HMM profile search | Yes (protein input) |
 
-Download BLAST+ from [NCBI](https://blast.ncbi.nlm.nih.gov/doc/blast-help/downloadblastdata.html) and HMMer from [hmmer.org](http://hmmer.org/).
+Download BLAST+ from [NCBI](https://blast.ncbi.nlm.nih.gov/doc/blast-help/downloadblastdata.html).
 
 ### AMRFinder database
 
@@ -173,7 +201,7 @@ All modules are public and can be used as a Rust library. Add to your `Cargo.tom
 
 ```toml
 [dependencies]
-amrfinder = { path = "amrfinder" }
+amrfinder-rs = "0.1"
 ```
 
 ### Validate a FASTA file
@@ -351,7 +379,7 @@ println!("Identity: {:.1}%", hsp.rel_identity() * 100.0);
 | BLAST + HMM (parallel) | ~3.3 s | ~3.3 s | Same external tools |
 | Orchestration overhead | ~0.15 s | ~0.9 s | Rust calls C++ amr_report |
 
-The total runtime is dominated by external BLAST (1.5 s) and HMM (3.9 s) searches, which run in parallel in both implementations.
+The total runtime is dominated by BLAST (external, 1.5 s) and HMM (pure Rust library, ~3.9 s) searches, which run in parallel.
 
 ### Component benchmarks
 
@@ -360,7 +388,7 @@ The total runtime is dominated by external BLAST (1.5 s) and HMM (3.9 s) searche
 | `fasta_check` (17 proteins) | 7 ms | 5 ms | **1.4x faster** |
 | `amr_report` (7647 BLAST + 24 HMM hits) | 161 ms | n/a | -- |
 | `blastp` (external, 6 threads) | 1.5 s | 1.5 s | same |
-| `hmmsearch` (external, 5 threads) | 3.9 s | 3.9 s | same |
+| `hmmsearch` (library / external) | 3.9 s | ~3.9 s | pure Rust library |
 
 ### Accuracy
 
@@ -397,15 +425,12 @@ amrfinder/src/
 
 | Crate | Purpose |
 |-------|---------|
-| `blast-rs` | Pure Rust BLAST (blastn library API) |
-| `hmmer-pure-rs` | Pure Rust HMM search (hmmsearch library API) |
+| `hmmer-pure-rs` | Pure Rust HMM search (replaces external hmmsearch) |
+| `blast-rs` | BLAST database I/O |
 | `ureq` | HTTP client for database downloads (replaces libcurl) |
 | `clap` | CLI argument parsing |
-| `rayon` | Thread pool for parallelism |
-| `noodles-fasta` | FASTA I/O |
-| `anyhow` / `thiserror` | Error handling |
+| `anyhow` | Error handling |
 | `tempfile` | Temporary directories |
-| `flate2` | Gzip support |
 
 ## Output format
 
@@ -445,16 +470,14 @@ cargo test
 # Run only unit tests (fast)
 cargo test --lib
 
-# Run integration tests (requires C++ binaries and database)
+# Run integration tests (requires BLAST+ binaries and database)
 cargo test --test integration
 ```
 
 33 tests covering FASTA validation, GFF parsing, graph algorithms, sequence matching, BLAST/HMM parsing, report generation, and end-to-end pipeline output comparison against C++.
 
-## License
+## License and Credits
 
-MIT
-
-## Credits
+See LICENSE file
 
 Based on [NCBI AMRFinderPlus](https://github.com/ncbi/amr) by the National Center for Biotechnology Information. Original C++ software is public domain (US Government work).
