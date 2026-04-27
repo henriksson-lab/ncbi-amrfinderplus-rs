@@ -202,7 +202,10 @@ impl TextTable {
 
         self.rows.sort_by(|a, b| {
             for &col in &col_nums {
-                let cmp = a.get(col).map(|s| s.as_str()).unwrap_or("")
+                let cmp = a
+                    .get(col)
+                    .map(|s| s.as_str())
+                    .unwrap_or("")
                     .cmp(b.get(col).map(|s| s.as_str()).unwrap_or(""));
                 if cmp != std::cmp::Ordering::Equal {
                     return cmp;
@@ -221,10 +224,7 @@ impl TextTable {
             .map(|name| self.col2num_required(name))
             .collect::<Result<Vec<_>>>()?;
 
-        let new_header: Vec<Header> = col_nums
-            .iter()
-            .map(|&i| self.header[i].clone())
-            .collect();
+        let new_header: Vec<Header> = col_nums.iter().map(|&i| self.header[i].clone()).collect();
 
         let new_rows: Vec<Vec<String>> = self
             .rows
@@ -314,10 +314,7 @@ mod tests {
 
     #[test]
     fn test_text_table_basic() {
-        let table = TextTable::with_header(vec![
-            Header::new("Name"),
-            Header::new("Value"),
-        ]);
+        let table = TextTable::with_header(vec![Header::new("Name"), Header::new("Value")]);
         assert_eq!(table.header.len(), 2);
         assert_eq!(table.col2num("Name"), Some(0));
         assert_eq!(table.col2num("Value"), Some(1));

@@ -116,7 +116,11 @@ pub struct Interval {
 
 impl Interval {
     pub fn new(start: usize, stop: usize, strand: Strand) -> Self {
-        Interval { start, stop, strand }
+        Interval {
+            start,
+            stop,
+            strand,
+        }
     }
 
     pub fn empty(&self) -> bool {
@@ -221,8 +225,8 @@ pub const STOP_SUFFIX: &str = "_STOP";
 pub struct Disruption {
     pub prev_hsp_idx: Option<usize>, // index into Hsp vector
     pub next_hsp_idx: Option<usize>,
-    pub prev_start: usize,           // position in prev qseq/sseq
-    pub next_stop: usize,            // position in next qseq/sseq
+    pub prev_start: usize, // position in prev qseq/sseq
+    pub next_stop: usize,  // position in next qseq/sseq
     pub intron: bool,
     // Cached intervals (computed from HSP data)
     pub q_interval: Interval,
@@ -278,9 +282,9 @@ pub struct Hsp {
     pub merged: bool,
 
     // Protein flags
-    pub q_prot: bool,  // reference is protein
-    pub s_prot: bool,  // user input is protein (false for blastx/tblastn DNA)
-    pub a_prot: bool,  // alignment is in protein space
+    pub q_prot: bool, // reference is protein
+    pub s_prot: bool, // user input is protein (false for blastx/tblastn DNA)
+    pub a_prot: bool, // alignment is in protein space
 
     // Unit conversion factors (1 or 3 for protein-to-DNA)
     pub a2q: usize,
@@ -289,12 +293,12 @@ pub struct Hsp {
     // BLAST fields — see struct doc for q/s convention
     pub qseqid: String,  // reference identifier (pipe-delimited metadata)
     pub sseqid: String,  // user's sequence identifier
-    pub q_int: Interval,  // alignment interval on reference
-    pub s_int: Interval,  // alignment interval on user's sequence
-    pub qlen: usize,      // reference sequence length
-    pub slen: usize,      // user's sequence length
-    pub qseq: String,     // aligned reference sequence (with gaps)
-    pub sseq: String,     // aligned user sequence (with gaps)
+    pub q_int: Interval, // alignment interval on reference
+    pub s_int: Interval, // alignment interval on user's sequence
+    pub qlen: usize,     // reference sequence length
+    pub slen: usize,     // user's sequence length
+    pub qseq: String,    // aligned reference sequence (with gaps)
+    pub sseq: String,    // aligned user sequence (with gaps)
 
     // Computed by finish_hsp()
     pub length: usize,
@@ -336,6 +340,10 @@ impl Hsp {
         self.q_int.len()
     }
 
+    pub fn q_effective_len(&self) -> usize {
+        self.qlen
+    }
+
     pub fn s_abs_coverage(&self) -> usize {
         self.s_int.len()
     }
@@ -345,7 +353,7 @@ impl Hsp {
     }
 
     pub fn q_rel_coverage(&self) -> f64 {
-        self.q_abs_coverage() as f64 / self.qlen as f64
+        self.q_abs_coverage() as f64 / self.q_effective_len() as f64
     }
 
     pub fn s_rel_coverage(&self) -> f64 {
@@ -353,7 +361,7 @@ impl Hsp {
     }
 
     pub fn q_complete(&self) -> bool {
-        self.q_abs_coverage() == self.qlen && self.c_complete != Some(false)
+        self.q_abs_coverage() == self.q_effective_len() && self.c_complete != Some(false)
     }
 
     pub fn perfect(&self) -> bool {
@@ -433,21 +441,42 @@ impl Hsp {
 
     /// Compute alignment statistics from qseq/sseq.
     /// Must be called after construction.
-    pub fn finish_hsp(&mut self, q_stop_codon: bool, _bacterial_start_codon: bool) {
+    pub fn finish_hsp(&mut self, q_stop_codon: bool, bacterial_start_codon: bool) {
         // Handle stop codon at query end
         if q_stop_codon && self.a_prot && !self.qseq.is_empty() {
-            let q_bytes = self.qseq.as_bytes();
-            let s_bytes = self.sseq.as_bytes();
-            let last = q_bytes.len() - 1;
-            if q_bytes[last] == b'*'
-                || (s_bytes[last] == b'*' && q_bytes[last] == b'-')
-            {
+            let q_stop = self.q_int.stop;
+            let q_len = self.qlen;
+            if q_stop == q_len {
+                assert_eq!(
+                    self.qseq.as_bytes().last().copied(),
+                    Some(b'*'),
+                    "ending stop codon is expected"
+                );
+                self.c_complete = Some(self.sseq.as_bytes().last().copied() == Some(b'*'));
+                let has_terminal_s_residue = self.had_terminal_s_residue();
                 self.qseq.pop();
                 self.sseq.pop();
-                self.qlen = self.qlen.saturating_sub(1);
                 self.q_int.stop = self.q_int.stop.saturating_sub(self.a2q);
-                self.c_complete = Some(true);
+                if has_terminal_s_residue {
+                    if self.s_int.strand == -1 {
+                        self.s_int.start += self.a2s;
+                    } else {
+                        self.s_int.stop = self.s_int.stop.saturating_sub(self.a2s);
+                    }
+                }
+            } else if q_stop == q_len.saturating_sub(1) && self.s_tail(false) >= self.a2s {
+                self.c_complete = Some(false);
             }
+            self.qlen = self.qlen.saturating_sub(1);
+        }
+
+        if bacterial_start_codon
+            && self.q_prot
+            && self.q_int.start == 0
+            && self.qseq.starts_with('M')
+            && matches!(self.sseq.as_bytes().first(), Some(b'L' | b'I' | b'V'))
+        {
+            self.sseq.replace_range(0..1, "M");
         }
 
         self.length = self.qseq.len();
@@ -494,6 +523,25 @@ impl Hsp {
                 }
             }
         }
+        self.s_internal_stop = self.a_prot && self.sseq.contains('*');
+    }
+
+    fn had_terminal_s_residue(&self) -> bool {
+        self.sseq
+            .as_bytes()
+            .last()
+            .is_some_and(|terminal| *terminal != b'-')
+    }
+
+    fn s_tail(&self, left: bool) -> usize {
+        if self.s_int.empty() {
+            return 0;
+        }
+        if (left && self.s_int.strand == 1) || (!left && self.s_int.strand == -1) {
+            self.s_int.start
+        } else {
+            self.slen.saturating_sub(self.s_int.stop)
+        }
     }
 
     /// Parse from BLAST tabular output line
@@ -513,21 +561,31 @@ impl Hsp {
         // Format: qseqid sseqid qstart qend qlen sstart send slen qseq sseq
         let qseqid = fields[0].to_string();
         let sseqid = fields[1].to_string();
-        let qstart: usize = fields[2].parse()?;
-        let qend: usize = fields[3].parse()?;
+        let mut qstart: usize = fields[2].parse()?;
+        let mut qend: usize = fields[3].parse()?;
         let qlen: usize = fields[4].parse()?;
-        let sstart: usize = fields[5].parse()?;
-        let send: usize = fields[6].parse()?;
+        let mut sstart: usize = fields[5].parse()?;
+        let mut send: usize = fields[6].parse()?;
         let slen: usize = fields[7].parse()?;
-        let qseq = fields[8].to_uppercase();
-        let sseq = fields[9].to_uppercase();
+        let mut qseq = fields[8].to_uppercase();
+        let mut sseq = fields[9].to_uppercase();
 
-        let s_strand: Strand = if sstart <= send { 1 } else { -1 };
-        let (sstart, send) = if s_strand == -1 {
-            (send, sstart)
-        } else {
-            (sstart, send)
-        };
+        let mut s_strand: Strand = 1;
+        if !s_prot {
+            if q_prot {
+                if sstart > send {
+                    s_strand = -1;
+                    std::mem::swap(&mut sstart, &mut send);
+                }
+            } else if qstart > qend {
+                std::mem::swap(&mut qstart, &mut qend);
+                if !a_prot {
+                    qseq = reverse_dna(&qseq);
+                    sseq = reverse_dna(&sseq);
+                }
+                s_strand = -1;
+            }
+        }
 
         // Convert from 1-based to 0-based
         let qstart = qstart.saturating_sub(1);
@@ -566,6 +624,31 @@ impl Hsp {
         hsp.finish_hsp(q_stop_codon, bacterial_start_codon);
         Ok(hsp)
     }
+}
+
+fn reverse_dna(seq: &str) -> String {
+    seq.chars()
+        .rev()
+        .map(|c| match c {
+            'A' => 'T',
+            'C' => 'G',
+            'G' => 'C',
+            'T' => 'A',
+            'M' => 'K',
+            'R' => 'Y',
+            'W' => 'W',
+            'S' => 'S',
+            'Y' => 'R',
+            'K' => 'M',
+            'V' => 'B',
+            'H' => 'D',
+            'D' => 'H',
+            'B' => 'V',
+            'N' => 'N',
+            '-' => '-',
+            other => other,
+        })
+        .collect()
 }
 
 impl Default for Hsp {
@@ -625,6 +708,20 @@ mod tests {
         assert!(aa_match('Z', 'E')); // Z = E or Q
         assert!(aa_match('J', 'I')); // J = I or L
         assert!(!aa_match('-', 'A'));
+    }
+
+    #[test]
+    fn test_bacterial_start_codon_liv_matches_reference_methionine() {
+        let line = concat!(
+            "ref|1|1|fam|gene|resistance|2|subclass|class|product\t",
+            "target\t1\t3\t3\t1\t3\t3\tMKA\tLKA"
+        );
+
+        let hsp = Hsp::from_blast_line(line, true, true, true, false, true).unwrap();
+
+        assert_eq!(hsp.sseq, "MKA");
+        assert_eq!(hsp.nident, 3);
+        assert_eq!(hsp.rel_identity(), 1.0);
     }
 
     #[test]

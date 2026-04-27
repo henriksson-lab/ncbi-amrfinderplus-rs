@@ -15,10 +15,10 @@ pub struct DiGraph {
 /// Node in the directed graph
 pub struct Node {
     pub id: NodeId,
-    pub out_arcs: Vec<usize>,  // indices into DiGraph::arcs
+    pub out_arcs: Vec<usize>, // indices into DiGraph::arcs
     pub in_arcs: Vec<usize>,
-    pub scc: Option<NodeId>,   // SCC representative
-    pub order_dfs: usize,      // 0 = not visited
+    pub scc: Option<NodeId>, // SCC representative
+    pub order_dfs: usize,    // 0 = not visited
     pub reachable: bool,
     // For SCC computation
     in_stack: bool,
@@ -78,12 +78,7 @@ impl DiGraph {
         }
     }
 
-    fn scc_visit(
-        &mut self,
-        node_id: NodeId,
-        visited_num: &mut usize,
-        stack: &mut Vec<NodeId>,
-    ) {
+    fn scc_visit(&mut self, node_id: NodeId, visited_num: &mut usize, stack: &mut Vec<NodeId>) {
         *visited_num += 1;
         let order = *visited_num;
         self.nodes[node_id].order_dfs = order;

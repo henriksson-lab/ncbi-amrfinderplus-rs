@@ -103,7 +103,9 @@ pub fn fasta_check(opts: &FastaCheckOpts) -> Result<(usize, usize, usize)> {
                     seq_size_sum += seq.len();
                 }
                 #[allow(unused_assignments)]
-                { xs = 0; }
+                {
+                    xs = 0;
+                }
                 header.clear();
                 seq.clear();
             }
@@ -126,8 +128,7 @@ pub fn fasta_check(opts: &FastaCheckOpts) -> Result<(usize, usize, usize)> {
                 continue;
             }
 
-            let error_prefix =
-                format!("File {}, line {}: ", fasta_path.display(), line_num);
+            let error_prefix = format!("File {}, line {}: ", fasta_path.display(), line_num);
 
             if let Some(after_gt) = line.strip_prefix('>') {
                 let pos = after_gt
@@ -153,11 +154,7 @@ pub fn fasta_check(opts: &FastaCheckOpts) -> Result<(usize, usize, usize)> {
                     }
                     for c in [',', ';', '.', '~'] {
                         if id.ends_with(c) {
-                            bail!(
-                                "{}Sequence identifier ends with \"{}\"",
-                                error_prefix,
-                                c
-                            );
+                            bail!("{}Sequence identifier ends with \"{}\"", error_prefix, c);
                         }
                     }
                     if id.contains("\\t") {
@@ -264,10 +261,22 @@ impl Segment {
 
 fn complementary_nucleotide(c: char) -> Result<char> {
     let r = match c.to_ascii_lowercase() {
-        'a' => 't', 'c' => 'g', 'g' => 'c', 't' => 'a',
-        'm' => 'k', 'r' => 'y', 'w' => 'w', 's' => 's',
-        'y' => 'r', 'k' => 'm', 'v' => 'b', 'h' => 'd',
-        'd' => 'h', 'b' => 'v', 'n' => 'n', '-' => '-',
+        'a' => 't',
+        'c' => 'g',
+        'g' => 'c',
+        't' => 'a',
+        'm' => 'k',
+        'r' => 'y',
+        'w' => 'w',
+        's' => 's',
+        'y' => 'r',
+        'k' => 'm',
+        'v' => 'b',
+        'h' => 'd',
+        'd' => 'h',
+        'b' => 'v',
+        'n' => 'n',
+        '-' => '-',
         _ => bail!("Bad nucleotide {}", c),
     };
     if c.is_ascii_uppercase() {
@@ -437,11 +446,7 @@ pub fn fasta_extract(
 
 /// Split FASTA file into parts without breaking sequences.
 /// Matches the C++ fasta2parts binary exactly.
-pub fn fasta2parts(
-    fasta_path: &Path,
-    parts_max: usize,
-    out_dir: &Path,
-) -> Result<()> {
+pub fn fasta2parts(fasta_path: &Path, parts_max: usize, out_dir: &Path) -> Result<()> {
     if parts_max <= 1 {
         bail!("Number of parts must be >= 2");
     }
@@ -518,8 +523,14 @@ mod tests {
             return;
         }
         let result = fasta_check(&FastaCheckOpts {
-            fasta_path: &path, aa: true, hyphen: false, ambig: false,
-            ambig_max: 0, stop_codon: false, len_path: None, out_path: None,
+            fasta_path: &path,
+            aa: true,
+            hyphen: false,
+            ambig: false,
+            ambig_max: 0,
+            stop_codon: false,
+            len_path: None,
+            out_path: None,
         });
         assert!(result.is_ok(), "fasta_check failed: {:?}", result.err());
     }
@@ -531,8 +542,14 @@ mod tests {
             return;
         }
         let result = fasta_check(&FastaCheckOpts {
-            fasta_path: &path, aa: false, hyphen: false, ambig: true,
-            ambig_max: 0, stop_codon: false, len_path: None, out_path: None,
+            fasta_path: &path,
+            aa: false,
+            hyphen: false,
+            ambig: true,
+            ambig_max: 0,
+            stop_codon: false,
+            len_path: None,
+            out_path: None,
         });
         assert!(result.is_ok(), "fasta_check failed: {:?}", result.err());
     }
@@ -553,13 +570,22 @@ mod tests {
         let cpp_stdout = String::from_utf8_lossy(&cpp_output.stdout);
 
         let (num_seqs, max_len, total_len) = fasta_check(&FastaCheckOpts {
-            fasta_path: &path, aa: true, hyphen: false, ambig: false,
-            ambig_max: 0, stop_codon: false, len_path: None, out_path: None,
-        }).unwrap();
+            fasta_path: &path,
+            aa: true,
+            hyphen: false,
+            ambig: false,
+            ambig_max: 0,
+            stop_codon: false,
+            len_path: None,
+            out_path: None,
+        })
+        .unwrap();
         let rust_stdout = format!("{}\n{}\n{}\n", num_seqs, max_len, total_len);
 
-        assert_eq!(cpp_stdout, rust_stdout,
-            "C++ and Rust fasta_check output differ for protein");
+        assert_eq!(
+            cpp_stdout, rust_stdout,
+            "C++ and Rust fasta_check output differ for protein"
+        );
     }
 
     #[test]
@@ -578,12 +604,21 @@ mod tests {
         let cpp_stdout = String::from_utf8_lossy(&cpp_output.stdout);
 
         let (num_seqs, max_len, total_len) = fasta_check(&FastaCheckOpts {
-            fasta_path: &path, aa: false, hyphen: false, ambig: true,
-            ambig_max: 0, stop_codon: false, len_path: None, out_path: None,
-        }).unwrap();
+            fasta_path: &path,
+            aa: false,
+            hyphen: false,
+            ambig: true,
+            ambig_max: 0,
+            stop_codon: false,
+            len_path: None,
+            out_path: None,
+        })
+        .unwrap();
         let rust_stdout = format!("{}\n{}\n{}\n", num_seqs, max_len, total_len);
 
-        assert_eq!(cpp_stdout, rust_stdout,
-            "C++ and Rust fasta_check output differ for DNA");
+        assert_eq!(
+            cpp_stdout, rust_stdout,
+            "C++ and Rust fasta_check output differ for DNA"
+        );
     }
 }

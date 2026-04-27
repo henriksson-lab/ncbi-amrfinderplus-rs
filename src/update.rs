@@ -7,7 +7,8 @@ use std::path::Path;
 
 use anyhow::Result;
 
-const NCBI_FTP_BASE: &str = "https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database";
+const NCBI_FTP_BASE: &str =
+    "https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database";
 
 /// Download a file from a URL to a local path
 pub fn download_file(url: &str, dest: &Path) -> Result<()> {

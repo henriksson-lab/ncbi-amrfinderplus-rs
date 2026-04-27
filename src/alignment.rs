@@ -15,7 +15,7 @@ pub struct AmrMutation {
     pub allele: String,
     pub gene: String,
     pub pos_std: i32,
-    pub frameshift: usize,      // NO_INDEX if not a frameshift
+    pub frameshift: usize, // NO_INDEX if not a frameshift
     pub frameshift_insertion: i32,
     // To be reported
     pub gene_mutation: String,
@@ -63,7 +63,10 @@ impl AmrMutation {
     pub fn wildtype(&self) -> String {
         format!(
             "{}_{}{}{}",
-            self.gene, self.reference, self.pos_std + 1, self.reference
+            self.gene,
+            self.reference,
+            self.pos_std + 1,
+            self.reference
         )
     }
 
@@ -131,7 +134,14 @@ impl AmrMutation {
             }
         }
 
-        (reference, allele, gene, pos_std, frameshift, frameshift_insertion)
+        (
+            reference,
+            allele,
+            gene,
+            pos_std,
+            frameshift,
+            frameshift_insertion,
+        )
     }
 
     pub fn apply(&self, seq: &mut String) -> anyhow::Result<()> {
@@ -235,11 +245,7 @@ pub struct Alignment {
 }
 
 impl Alignment {
-    pub fn from_blast_line(
-        line: &str,
-        q_prot: bool,
-        s_prot: bool,
-    ) -> anyhow::Result<Self> {
+    pub fn from_blast_line(line: &str, q_prot: bool, s_prot: bool) -> anyhow::Result<Self> {
         let a_prot = q_prot || s_prot;
         let hsp = Hsp::from_blast_line(line, q_prot, s_prot, a_prot, q_prot, true)?;
 
@@ -265,7 +271,14 @@ mod tests {
 
     #[test]
     fn test_amr_mutation_parse_simple() {
-        let m = AmrMutation::new(100, "gyrA_S83L", "gyrA_S83L", "QUINOLONE", "FLUOROQUINOLONE", "name");
+        let m = AmrMutation::new(
+            100,
+            "gyrA_S83L",
+            "gyrA_S83L",
+            "QUINOLONE",
+            "FLUOROQUINOLONE",
+            "name",
+        );
         assert_eq!(m.gene, "gyrA");
         assert_eq!(m.reference, "S");
         assert_eq!(m.allele, "L");
@@ -275,7 +288,14 @@ mod tests {
 
     #[test]
     fn test_amr_mutation_parse_negative_pos() {
-        let m = AmrMutation::new(40, "ampC_T-14TGT", "ampC_T-14TGT", "BETA-LACTAM", "CEPH", "name");
+        let m = AmrMutation::new(
+            40,
+            "ampC_T-14TGT",
+            "ampC_T-14TGT",
+            "BETA-LACTAM",
+            "CEPH",
+            "name",
+        );
         assert_eq!(m.gene, "ampC");
         assert_eq!(m.reference, "T");
         assert_eq!(m.allele, "TGT");
@@ -284,7 +304,14 @@ mod tests {
 
     #[test]
     fn test_amr_mutation_parse_stop_codon() {
-        let m = AmrMutation::new(141, "nfsA_K141Ter", "nfsA_K141Ter", "NITRO", "NITRO", "name");
+        let m = AmrMutation::new(
+            141,
+            "nfsA_K141Ter",
+            "nfsA_K141Ter",
+            "NITRO",
+            "NITRO",
+            "name",
+        );
         assert_eq!(m.gene, "nfsA");
         assert_eq!(m.reference, "K");
         assert_eq!(m.allele, "Ter");

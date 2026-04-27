@@ -178,7 +178,7 @@ fn main() {
             blast_bin,
             hmmer_bin,
             output,
-            report_common: _,
+            report_common,
             report_all_equal: _,
             database_version,
             list_organisms,
@@ -231,6 +231,7 @@ fn main() {
                 coverage_min,
                 threads,
                 plus,
+                report_common,
                 print_node,
                 mutation_all,
                 annotation_format,
@@ -257,15 +258,29 @@ fn main() {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/usr/local/share/amrfinder/data"))
             });
-            eprintln!("Database update not yet implemented. Database dir: {}", db.display());
+            eprintln!(
+                "Database update not yet implemented. Database dir: {}",
+                db.display()
+            );
             Ok(())
         }
         Commands::CheckFasta {
-            input, aa, hyphen, ambig, ambig_max, stop_codon, len, out,
+            input,
+            aa,
+            hyphen,
+            ambig,
+            ambig_max,
+            stop_codon,
+            len,
+            out,
         } => {
             let opts = amrfinder::fasta_utils::FastaCheckOpts {
                 fasta_path: &input,
-                aa, hyphen, ambig, ambig_max, stop_codon,
+                aa,
+                hyphen,
+                ambig,
+                ambig_max,
+                stop_codon,
                 len_path: len.as_deref(),
                 out_path: out.as_deref(),
             };
@@ -282,9 +297,11 @@ fn main() {
             let mut out = stdout.lock();
             amrfinder::fasta_utils::fasta_extract(&fasta, &target, aa, &mut out)
         }
-        Commands::SplitFasta { input, parts_max, dir } => {
-            amrfinder::fasta_utils::fasta2parts(&input, parts_max, &dir)
-        }
+        Commands::SplitFasta {
+            input,
+            parts_max,
+            dir,
+        } => amrfinder::fasta_utils::fasta2parts(&input, parts_max, &dir),
     };
 
     if let Err(e) = result {

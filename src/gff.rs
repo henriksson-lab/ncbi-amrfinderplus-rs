@@ -21,8 +21,16 @@ pub enum GffType {
 
 impl GffType {
     pub const NAMES: &[&str] = &[
-        "bakta", "genbank", "microscope", "patric", "pgap",
-        "prodigal", "prokka", "pseudomonasdb", "rast", "standard",
+        "bakta",
+        "genbank",
+        "microscope",
+        "patric",
+        "pgap",
+        "prodigal",
+        "prokka",
+        "pseudomonasdb",
+        "rast",
+        "standard",
     ];
 
     pub fn from_name(name: &str) -> Result<GffType> {
@@ -154,10 +162,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(val) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(val) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 result.push(val as char);
                 i += 3;
                 continue;
@@ -177,7 +184,9 @@ fn pgap_accession(accession: &mut String, lcl: bool) -> Result<()> {
         if lcl {
             bail!(
                 "Accession \"{}\" cannot have \"{}\" and \"{}\" at the same time",
-                accession, gnl_prefix, lcl_prefix
+                accession,
+                gnl_prefix,
+                lcl_prefix
             );
         }
         // Replace ':' with '|' at the position
@@ -205,12 +214,7 @@ pub struct Annot {
 
 impl Annot {
     /// Parse a GFF file
-    pub fn from_gff(
-        fname: &str,
-        gff_type: GffType,
-        prot_match: bool,
-        lcl: bool,
-    ) -> Result<Self> {
+    pub fn from_gff(fname: &str, gff_type: GffType, prot_match: bool, lcl: bool) -> Result<Self> {
         assert!(
             !prot_match
                 || gff_type == GffType::Genbank
@@ -238,9 +242,7 @@ impl Annot {
             let trimmed = line.trim().to_string();
             line = trimmed;
 
-            if (gff_type == GffType::Prokka || gff_type == GffType::Bakta)
-                && line == "##FASTA"
-            {
+            if (gff_type == GffType::Prokka || gff_type == GffType::Bakta) && line == "##FASTA" {
                 break;
             }
 
@@ -453,7 +455,10 @@ impl Annot {
 
             let fields: Vec<&str> = line.split('\t').collect();
             if fields.len() < 6 {
-                bail!("{}at least 5 fields are expected in each line", error_prefix);
+                bail!(
+                    "{}at least 5 fields are expected in each line",
+                    error_prefix
+                );
             }
 
             let contig = fields[0];
@@ -637,12 +642,7 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let annot = Annot::from_gff(
-            path.to_str().unwrap(),
-            GffType::Genbank,
-            false,
-            false,
-        );
+        let annot = Annot::from_gff(path.to_str().unwrap(), GffType::Genbank, false, false);
         assert!(annot.is_ok(), "GFF parse failed: {:?}", annot.err());
         let annot = annot.unwrap();
         assert!(!annot.prot2loci.is_empty());

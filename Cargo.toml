@@ -19,8 +19,8 @@ name = "amrfinder"
 path = "src/lib.rs"
 
 [dependencies]
-blast-rs = "0.5"
-hmmer-pure-rs = "0.4"
+blast-rs = { path = "../newblast" }
+hmmer = { package = "hmmer-pure-rs", path = "../newhmmer" }
 ureq = "3"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
