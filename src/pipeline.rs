@@ -11,6 +11,7 @@ use anyhow::{bail, Result};
 use crate::fasta_utils::{self, FastaCheckOpts};
 
 /// Pipeline configuration
+#[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct PipelineConfig {
     pub protein: Option<PathBuf>,

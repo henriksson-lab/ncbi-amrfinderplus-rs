@@ -1,7 +1,8 @@
-# AMRFinderPlus (Rust)
+# AMRFinderPlus-rs
 
-A Rust reimplementation of [NCBI AMRFinderPlus](https://github.com/ncbi/amr) (v4.2.7) for identifying antimicrobial resistance (AMR) genes and point mutations in bacterial protein and nucleotide sequences.
+A Rust translation of [NCBI AMRFinderPlus](https://github.com/ncbi/amr) (v4.2.7) for identifying antimicrobial resistance (AMR) genes and point mutations in bacterial protein and nucleotide sequences.
 
+* 2026-04-27: Crate passes tests and appears functional. Use on your own risk as bugs may still remain
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
 
@@ -48,20 +49,6 @@ cargo install --path .
 # Build with native CPU optimizations
 RUSTFLAGS="-C target-cpu=native" cargo install --path .
 ```
-
-### External dependencies
-
-HMM search uses the built-in pure Rust `hmmer-pure-rs` library (no external hmmsearch needed).
-
-The pipeline shells out to BLAST+ for sequence search (must be in `$PATH` or specified via `--blast_bin`):
-
-| Tool | Used for | Required? |
-|------|----------|-----------|
-| `blastp` | Protein-vs-protein search | Yes (protein input) |
-| `blastx` / `tblastn` | Translated nucleotide search | Yes (nucleotide input) |
-| `blastn` | DNA point mutation search | Only with `--organism` + nucleotide |
-
-Download BLAST+ from [NCBI](https://blast.ncbi.nlm.nih.gov/doc/blast-help/downloadblastdata.html).
 
 ### AMRFinder database
 
@@ -282,7 +269,66 @@ println!("Identity: {:.1}%", al.hsp.rel_identity() * 100.0);
 println!("Coverage: {:.1}%", al.hsp.q_rel_coverage() * 100.0);
 ```
 
-### Run the full report pipeline programmatically
+### Run the full pipeline programmatically
+
+Minimum required builder inputs are:
+
+- `.database(...)`
+- at least one of `.protein(...)` or `.nucleotide(...)`
+
+Everything else uses AMRFinder-compatible defaults: `threads(4)`, `coverage_min(0.5)`, `ident_min(-1.0)`, `translation_table(11)`, `annotation_format("genbank")`, plus reporting disabled, hierarchy node output disabled, and no mutation-all side file.
+
+Minimal protein input:
+
+```rust
+use amrfinder::AmrFinder;
+
+let run = AmrFinder::builder()
+    .protein("proteins.fa")
+    .database("db")
+    .run()
+    .unwrap();
+
+println!("{}", run.report);
+```
+
+Nucleotide input with organism-specific mutation detection:
+
+```rust
+use amrfinder::AmrFinder;
+
+let run = AmrFinder::builder()
+    .nucleotide("contigs.fa")
+    .database("db")
+    .organism("Escherichia")
+    .run()
+    .unwrap();
+
+println!("{}", run.report);
+```
+
+Fuller example with common optional settings:
+
+```rust
+use amrfinder::AmrFinder;
+
+let run = AmrFinder::builder()
+    .protein("proteins.fa")
+    .nucleotide("contigs.fa")
+    .gff("annotations.gff")
+    .database("db")
+    .organism("Escherichia")
+    .plus(true)
+    .print_node(true)
+    .threads(8)
+    .mutation_all("mutation_all.tsv")
+    .run()
+    .unwrap();
+
+println!("{}", run.report);
+```
+
+### Run amr_report directly
 
 ```rust
 use amrfinder::amr_reportcli::{AmrReportConfig, run_amr_report};
@@ -299,9 +345,11 @@ let config = AmrReportConfig {
     organism: "Escherichia",
     mutation_file: Some(Path::new("db/AMRProt-mutation.tsv")),
     susceptible_file: Some(Path::new("db/AMRProt-susceptible.tsv")),
+    suppress_file: None,
     coverage_min: 0.5,
     ident_min: -1.0,
     print_node: false,
+    mutation_all: None,
     report_core_only: false,
     cds_exist: true,
 };
