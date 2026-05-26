@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::process;
@@ -157,7 +158,7 @@ enum Commands {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(args_with_default_run_subcommand());
 
     let result = match cli.command {
         Commands::Run {
@@ -179,7 +180,7 @@ fn main() {
             hmmer_bin,
             output,
             report_common,
-            report_all_equal: _,
+            report_all_equal,
             database_version,
             list_organisms,
         } => {
@@ -232,6 +233,7 @@ fn main() {
                 threads,
                 plus,
                 report_common,
+                report_all_equal,
                 print_node,
                 mutation_all,
                 annotation_format,
@@ -308,4 +310,18 @@ fn main() {
         eprintln!("Error: {}", e);
         process::exit(1);
     }
+}
+
+fn args_with_default_run_subcommand() -> Vec<OsString> {
+    let mut args: Vec<OsString> = std::env::args_os().collect();
+    let Some(first_arg) = args.get(1) else {
+        return args;
+    };
+    if first_arg
+        .to_str()
+        .is_some_and(|arg| arg.starts_with('-') && arg != "-h" && arg != "--help")
+    {
+        args.insert(1, OsString::from("run"));
+    }
+    args
 }

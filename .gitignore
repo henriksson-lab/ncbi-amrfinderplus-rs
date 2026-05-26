@@ -1,0 +1,13 @@
+target/
+
+# Local parity-test dependencies and downloaded/generated databases.
+amr/
+amrfinder_db/
+
+# Local assistant/session files.
+.codex
+.claude/
+CLAUDE.md
+
+# This repository has historically not tracked Cargo.lock.
+Cargo.lock

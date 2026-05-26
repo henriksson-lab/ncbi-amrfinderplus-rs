@@ -7,6 +7,8 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
+const HMMSEARCH_EFFECTIVE_Z: f64 = 10_000.0;
+
 /// Run HMM search using hmmer-pure-rs library
 pub fn run_hmmsearch_library(
     hmm_db_path: &Path,
@@ -39,6 +41,8 @@ pub fn run_hmmsearch_library(
         let mut pli = Pipeline::new();
         pli.new_model(&gm);
         pli.use_bit_cutoffs = BitCutoff::TC;
+        pli.z = HMMSEARCH_EFFECTIVE_Z;
+        pli.z_setby = ZSetBy::Option;
         if let Err(e) = pli.new_model_thresholds(&hmm.cutoff) {
             return Err(anyhow!("failed to apply TC cutoffs for {}: {e}", hmm.name));
         }
@@ -98,31 +102,37 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn require_path(path: &Path) {
+        assert!(
+            path.exists(),
+            "required HMM parity fixture is missing: {}",
+            path.display()
+        );
+    }
+
+    fn require_h3m(hmm_path: &Path) {
+        let h3m = format!("{}.h3m", hmm_path.to_str().unwrap());
+        require_path(Path::new(&h3m));
+    }
+
     #[test]
     fn test_hmmsearch_library() {
         let db = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amrfinder_db/2026-03-24.1");
         let hmm_path = db.join("AMR.LIB");
         let query = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amr/test_prot.fa");
 
-        if !hmm_path.exists() || !query.exists() {
-            return;
-        }
-
-        let h3m = format!("{}.h3m", hmm_path.to_str().unwrap());
-        if !Path::new(&h3m).exists() {
-            return;
-        }
+        require_path(&hmm_path);
+        require_path(&query);
+        require_h3m(&hmm_path);
 
         let tblout = std::env::temp_dir().join("test_hmmsearch_tblout");
         let domtblout = std::env::temp_dir().join("test_hmmsearch_domtblout");
 
-        let result = run_hmmsearch_library(&hmm_path, &query, &tblout, &domtblout);
-        if let Ok(()) = result {
-            assert!(tblout.exists());
-            assert!(domtblout.exists());
-            std::fs::remove_file(&tblout).ok();
-            std::fs::remove_file(&domtblout).ok();
-        }
+        run_hmmsearch_library(&hmm_path, &query, &tblout, &domtblout).unwrap();
+        assert!(tblout.exists());
+        assert!(domtblout.exists());
+        std::fs::remove_file(&tblout).ok();
+        std::fs::remove_file(&domtblout).ok();
     }
 
     /// Diagnostic: check that HMMs and sequences load, and that at least some hits are found.
@@ -131,13 +141,9 @@ mod tests {
         let db = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amrfinder_db/2026-03-24.1");
         let hmm_path = db.join("AMR.LIB");
         let query = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/test_prot.fa");
-        if !hmm_path.exists() || !query.exists() {
-            return;
-        }
-        let h3m = format!("{}.h3m", hmm_path.to_str().unwrap());
-        if !Path::new(&h3m).exists() {
-            return;
-        }
+        require_path(&hmm_path);
+        require_path(&query);
+        require_h3m(&hmm_path);
 
         let tblout = std::env::temp_dir().join("hmm_lib_hits.tblout");
         let domtblout = std::env::temp_dir().join("hmm_lib_hits.domtblout");
@@ -164,19 +170,9 @@ mod tests {
         let hmm_path = db.join("AMR.LIB");
         let query = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/test_prot.fa");
 
-        if !hmm_path.exists() || !query.exists() {
-            return;
-        }
-        let h3m = format!("{}.h3m", hmm_path.to_str().unwrap());
-        if !Path::new(&h3m).exists() {
-            return;
-        }
-
-        // Check external hmmsearch exists
-        let which = Command::new("which").arg("hmmsearch").output();
-        if which.is_err() || !which.unwrap().status.success() {
-            return;
-        }
+        require_path(&hmm_path);
+        require_path(&query);
+        require_h3m(&hmm_path);
 
         // Run external hmmsearch
         let ext_tblout = std::env::temp_dir().join("hmm_ext_compare.tblout");
@@ -197,9 +193,11 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .status();
-        if ext_status.is_err() || !ext_status.unwrap().success() {
-            return;
-        }
+        let ext_status = ext_status.expect("external hmmsearch should be installed for parity");
+        assert!(
+            ext_status.success(),
+            "external hmmsearch failed during HMM parity comparison"
+        );
 
         // Run library hmmsearch
         let lib_tblout = std::env::temp_dir().join("hmm_lib_compare.tblout");
@@ -271,12 +269,11 @@ mod tests {
             "Score differences > 1.0 bit:\n  {}",
             score_diffs.join("\n  ")
         );
-        if !extra.is_empty() {
-            eprintln!(
-                "NOTE: Library found {} extra hits not in external: {}",
-                extra.len(),
-                extra.join(", ")
-            );
-        }
+        assert!(
+            extra.is_empty(),
+            "Library hmmsearch found {} extra hits not in external:\n  {}",
+            extra.len(),
+            extra.join("\n  ")
+        );
     }
 }

@@ -289,15 +289,21 @@ pub struct AmrReportConfig<'a> {
     pub ident_min: f64,
     pub print_node: bool,
     pub mutation_all: Option<&'a Path>,
+    pub name: &'a str,
     pub report_core_only: bool,
+    pub report_all_equal: bool,
     pub cds_exist: bool,
 }
 
 /// Run the amr_report processing pipeline
 pub fn run_amr_report(config: &AmrReportConfig, out: &mut dyn Write) -> Result<()> {
-    let reportable_min = if config.report_core_only { 1 } else { 0 };
+    let reportable_min = if config.report_core_only { 2 } else { 0 };
     let mut batch = Batch::from_fam_file(config.fam_file, reportable_min)?;
     batch.cds_exist = config.cds_exist;
+    batch.name = config.name.to_string();
+    batch.ident_min = config.ident_min;
+    batch.coverage_min = config.coverage_min;
+    batch.report_all_equal = config.report_all_equal;
 
     // Load mutations and susceptible data
     if let Some(mut_file) = config.mutation_file {
@@ -336,31 +342,29 @@ pub fn run_amr_report(config: &AmrReportConfig, out: &mut dyn Write) -> Result<(
 
     // Load GFF annotations and assign CDSs to BLAST alignments
     if let Some(gff_file) = config.gff_file {
-        let gff_type = GffType::from_name(config.gff_type).unwrap_or(GffType::Genbank);
-        if let Ok(annot) = Annot::from_gff(gff_file.to_str().unwrap_or(""), gff_type, false, false)
-        {
-            // Assign CDS loci to protein BLAST alignments
-            for al in &mut batch.blast_als {
-                if !al.hsp.s_prot {
-                    continue;
-                }
-                if let Ok(loci) = annot.find_loci(&al.hsp.sseqid) {
-                    al.cdss = loci
-                        .iter()
-                        .map(|l| crate::gff::Locus {
-                            line_num: l.line_num,
-                            contig: l.contig.clone(),
-                            start: l.start,
-                            stop: l.stop,
-                            strand: l.strand,
-                            partial: l.partial,
-                            contig_len: l.contig_len,
-                            cross_origin: l.cross_origin,
-                            gene: l.gene.clone(),
-                            product: l.product.clone(),
-                        })
-                        .collect();
-                }
+        let gff_type = GffType::from_name(config.gff_type)?;
+        let annot = Annot::from_gff(gff_file.to_str().unwrap_or(""), gff_type, false, false)?;
+        // Assign CDS loci to protein BLAST alignments
+        for al in &mut batch.blast_als {
+            if !al.hsp.s_prot {
+                continue;
+            }
+            if let Ok(loci) = annot.find_loci(&al.hsp.sseqid) {
+                al.cdss = loci
+                    .iter()
+                    .map(|l| crate::gff::Locus {
+                        line_num: l.line_num,
+                        contig: l.contig.clone(),
+                        start: l.start,
+                        stop: l.stop,
+                        strand: l.strand,
+                        partial: l.partial,
+                        contig_len: l.contig_len,
+                        cross_origin: l.cross_origin,
+                        gene: l.gene.clone(),
+                        product: l.product.clone(),
+                    })
+                    .collect();
             }
         }
     }
@@ -435,7 +439,9 @@ mod tests {
             ident_min: -1.0,
             print_node: true,
             mutation_all: None,
+            name: "",
             report_core_only: false,
+            report_all_equal: false,
             cds_exist: true,
         };
         run_amr_report(&config, &mut output).unwrap();
@@ -474,7 +480,9 @@ mod tests {
             ident_min: -1.0,
             print_node: true,
             mutation_all: None,
+            name: "",
             report_core_only: false,
+            report_all_equal: false,
             cds_exist: true,
         };
         run_amr_report(&config, &mut output).unwrap();
@@ -519,7 +527,9 @@ mod tests {
             ident_min: -1.0,
             print_node: true,
             mutation_all: None,
+            name: "",
             report_core_only: false,
+            report_all_equal: false,
             cds_exist: true,
         };
         run_amr_report(&config, &mut output).unwrap();
@@ -564,7 +574,9 @@ mod tests {
             ident_min: -1.0,
             print_node: true,
             mutation_all: None,
+            name: "",
             report_core_only: false,
+            report_all_equal: false,
             cds_exist: true,
         };
         run_amr_report(&config, &mut output).unwrap();
@@ -755,7 +767,9 @@ mod tests {
             ident_min: -1.0,
             print_node: true,
             mutation_all: None,
+            name: "",
             report_core_only: false,
+            report_all_equal: false,
             cds_exist: true,
         };
         run_amr_report(&config, &mut output).unwrap();
@@ -804,7 +818,9 @@ mod tests {
             ident_min: -1.0,
             print_node: true,
             mutation_all: Some(mutation_all.path()),
+            name: "",
             report_core_only: false,
+            report_all_equal: false,
             cds_exist: true,
         };
         run_amr_report(&config, &mut output).unwrap();

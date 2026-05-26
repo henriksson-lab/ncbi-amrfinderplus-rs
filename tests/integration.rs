@@ -1,6 +1,6 @@
 // Integration tests comparing Rust output against C++ golden files
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn test_data_dir() -> PathBuf {
@@ -24,12 +24,34 @@ fn db_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amrfinder_db/2026-03-24.1")
 }
 
-fn require_pipeline_fixture(paths: &[PathBuf]) -> bool {
-    let db = db_dir();
-    db.exists() && db.join("AMRProt.fa.phr").exists() && paths.iter().all(|path| path.exists())
+fn require_file(path: &Path) {
+    assert!(
+        path.exists(),
+        "required parity fixture is missing: {}",
+        path.display()
+    );
 }
 
-fn run_amrfinder(args: &[&str]) -> String {
+fn require_cpp_binary(name: &str) -> PathBuf {
+    let binary = cpp_binary(name);
+    assert!(
+        binary.exists(),
+        "required C++ parity binary is missing: {}",
+        binary.display()
+    );
+    binary
+}
+
+fn require_pipeline_fixture(paths: &[PathBuf]) {
+    let db = db_dir();
+    require_file(&db);
+    require_file(&db.join("AMRProt.fa.phr"));
+    for path in paths {
+        require_file(path);
+    }
+}
+
+fn run_amrfinder_bytes(args: &[&str]) -> Vec<u8> {
     let output = Command::new(rust_binary())
         .args(args)
         .output()
@@ -40,7 +62,11 @@ fn run_amrfinder(args: &[&str]) -> String {
         panic!("Rust pipeline failed: {stderr}");
     }
 
-    String::from_utf8(output.stdout).expect("pipeline output should be UTF-8")
+    output.stdout
+}
+
+fn run_amrfinder(args: &[&str]) -> String {
+    String::from_utf8(run_amrfinder_bytes(args)).expect("pipeline output should be UTF-8")
 }
 
 fn run_cpp_amrfinder(args: &[&str]) -> String {
@@ -61,11 +87,9 @@ fn run_cpp_amrfinder(args: &[&str]) -> String {
 
 #[test]
 fn test_fasta_check_protein_golden() {
-    let cpp_bin = cpp_binary("fasta_check");
+    let cpp_bin = require_cpp_binary("fasta_check");
     let input = test_data_dir().join("test_prot.fa");
-    if !cpp_bin.exists() || !input.exists() {
-        return;
-    }
+    require_file(&input);
 
     let cpp_out = Command::new(&cpp_bin)
         .arg(&input)
@@ -87,11 +111,9 @@ fn test_fasta_check_protein_golden() {
 
 #[test]
 fn test_fasta_check_dna_golden() {
-    let cpp_bin = cpp_binary("fasta_check");
+    let cpp_bin = require_cpp_binary("fasta_check");
     let input = test_data_dir().join("test_dna.fa");
-    if !cpp_bin.exists() || !input.exists() {
-        return;
-    }
+    require_file(&input);
 
     let cpp_out = Command::new(&cpp_bin)
         .arg(&input)
@@ -116,57 +138,33 @@ fn test_rust_pipeline_protein_current_regression() {
     let db_dir = db_dir();
     let input = test_data_dir().join("test_prot.fa");
     let gff = test_data_dir().join("test_prot.gff");
+    require_cpp_binary("amrfinder");
+    require_pipeline_fixture(&[input.clone(), gff.clone()]);
 
-    if !db_dir.exists() || !input.exists() || !gff.exists() {
-        return;
-    }
-    if !db_dir.join("AMRProt.fa.phr").exists() {
-        return;
-    }
+    let cpp_args = [
+        "-p",
+        input.to_str().unwrap(),
+        "-g",
+        gff.to_str().unwrap(),
+        "-O",
+        "Escherichia",
+        "--plus",
+        "--print_node",
+        "-d",
+        db_dir.to_str().unwrap(),
+        "--threads",
+        "6",
+    ];
+    let expected = run_cpp_amrfinder(&cpp_args);
 
-    let output = Command::new(rust_binary())
-        .args([
-            "run",
-            "-p",
-            input.to_str().unwrap(),
-            "-g",
-            gff.to_str().unwrap(),
-            "-O",
-            "Escherichia",
-            "--plus",
-            "--print_node",
-            "-d",
-            db_dir.to_str().unwrap(),
-            "--threads",
-            "6",
-        ])
-        .output()
-        .expect("Rust pipeline failed");
+    let mut rust_args = vec!["run"];
+    rust_args.extend(cpp_args);
+    let actual = run_amrfinder(&rust_args);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("Rust pipeline failed: {stderr}");
-    }
-
-    let actual = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = actual.lines().collect();
     assert_eq!(
-        lines.len(),
-        15,
-        "protein pipeline should emit header plus 14 rows"
+        actual, expected,
+        "protein pipeline output should match C++ amrfinder byte-for-byte"
     );
-    assert!(actual.contains(
-        "aph3pp-Ib_partial_5p_neg\tcontig09\t1\t675\t-\taph(3'')-Ib\taminoglycoside O-phosphotransferase APH(3'')-Ib\tcore\tAMR\tAMR\tAMINOGLYCOSIDE\tSTREPTOMYCIN\tPARTIAL_CONTIG_ENDP\t225\t267\t81.27\t100.00"
-    ));
-    assert!(actual.contains(
-        "pmrB_C84R\tcontig14\t1093\t2181\t+\tpmrB_C84R\tEscherichia colistin resistant PmrB\tcore\tAMR\tPOINT\tCOLISTIN\tCOLISTIN\tPOINTP"
-    ));
-    assert!(actual.contains(
-        "nfsA_R15C_K141STOP\tcontig16\t1\t423\t+\tnfsA_R15C\tEscherichia nitrofurantoin resistant NfsA\tcore\tAMR\tPOINT\tNITROFURAN\tNITROFURANTOIN\tPOINTP"
-    ));
-    assert!(actual.contains(
-        "blaOXA-436_partial\tcontig03\t101\t802\t+\tblaOXA\tOXA-48 family class D beta-lactamase"
-    ));
 }
 
 #[test]
@@ -174,9 +172,7 @@ fn test_rust_pipeline_nucleotide_matches_cpp_expected() {
     let db = db_dir();
     let input = test_data_dir().join("test_dna.fa");
     let expected = test_data_dir().join("test_dna.expected");
-    if !require_pipeline_fixture(&[input.clone(), expected.clone()]) {
-        return;
-    }
+    require_pipeline_fixture(&[input.clone(), expected.clone()]);
 
     let mutation_all = tempfile::NamedTempFile::new().expect("mutation_all tempfile");
     let actual = run_amrfinder(&[
@@ -221,11 +217,9 @@ fn test_rust_pipeline_nucleotide_matches_cpp_expected() {
 #[test]
 fn test_rust_pipeline_mutation_all_matches_cpp() {
     let db = db_dir();
-    let cpp = cpp_binary("amrfinder");
     let input = test_data_dir().join("test_dna.fa");
-    if !cpp.exists() || !require_pipeline_fixture(std::slice::from_ref(&input)) {
-        return;
-    }
+    require_cpp_binary("amrfinder");
+    require_pipeline_fixture(std::slice::from_ref(&input));
 
     let cpp_mutation_all = tempfile::NamedTempFile::new().expect("C++ mutation_all tempfile");
     let rust_mutation_all = tempfile::NamedTempFile::new().expect("Rust mutation_all tempfile");
@@ -268,14 +262,12 @@ fn test_rust_pipeline_protein_and_nucleotide_matches_cpp_expected() {
     let nucleotide = test_data_dir().join("test_dna.fa");
     let gff = test_data_dir().join("test_prot.gff");
     let expected = test_data_dir().join("test_both.expected");
-    if !require_pipeline_fixture(&[
+    require_pipeline_fixture(&[
         protein.clone(),
         nucleotide.clone(),
         gff.clone(),
         expected.clone(),
-    ]) {
-        return;
-    }
+    ]);
 
     let actual = run_amrfinder(&[
         "run",
@@ -307,9 +299,7 @@ fn test_rust_pipeline_report_common_keeps_organism_suppressed_rows() {
     let db = db_dir();
     let input = test_data_dir().join("test_prot.fa");
     let gff = test_data_dir().join("test_prot.gff");
-    if !require_pipeline_fixture(&[input.clone(), gff.clone()]) {
-        return;
-    }
+    require_pipeline_fixture(&[input.clone(), gff.clone()]);
 
     let actual = run_amrfinder(&[
         "run",
@@ -337,11 +327,9 @@ fn test_rust_pipeline_report_common_keeps_organism_suppressed_rows() {
 #[test]
 fn test_rust_pipeline_campylobacter_matches_cpp() {
     let db = db_dir();
-    let cpp = cpp_binary("amrfinder");
     let input = test_data_dir().join("test_prot.fa");
-    if !cpp.exists() || !require_pipeline_fixture(std::slice::from_ref(&input)) {
-        return;
-    }
+    require_cpp_binary("amrfinder");
+    require_pipeline_fixture(std::slice::from_ref(&input));
 
     let common = [
         "-p",
@@ -371,9 +359,7 @@ fn test_rust_pipeline_campylobacter_matches_cpp() {
 fn test_rust_pipeline_does_not_synthesize_stx_operon_without_plus() {
     let db = db_dir();
     let input = test_data_dir().join("test_dna.fa");
-    if !require_pipeline_fixture(std::slice::from_ref(&input)) {
-        return;
-    }
+    require_pipeline_fixture(std::slice::from_ref(&input));
 
     let actual = run_amrfinder(&[
         "run",

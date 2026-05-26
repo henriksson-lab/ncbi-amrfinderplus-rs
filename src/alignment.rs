@@ -77,7 +77,7 @@ impl AmrMutation {
     /// - `gyrA_S83L` → gene=gyrA, ref=S, pos=83, allele=L
     /// - `blaTEMp_G162T` → gene=blaTEMp, ref=G, pos=162, allele=T
     /// - `ampC_T-14TGT` → gene=ampC, ref=T, pos=-14, allele=TGT
-    /// - `nfsA_K141Ter` → gene=nfsA, ref=K, pos=141, allele=Ter (stop codon)
+    /// - `nfsA_K141Ter` → gene=nfsA, ref=K, pos=141, allele=* (stop codon)
     /// - `nfsA_R15C` → gene=nfsA, ref=R, pos=15, allele=C
     fn parse(gene_mutation_std: &str) -> (String, String, String, i32, usize, i32) {
         let mut reference = String::new();
@@ -113,7 +113,7 @@ impl AmrMutation {
                 }
             }
 
-            // Phase 3: Collect allele (remaining, possibly with * frameshift)
+            // Phase 3: Collect allele (remaining, possibly with frameshift)
             let allele_part = &rest[i..];
             if let Some(star_pos) = allele_part.find('*') {
                 allele = allele_part[..star_pos].to_string();
@@ -129,9 +129,24 @@ impl AmrMutation {
                 } else if let Ok(fs) = fs_part.parse::<usize>() {
                     frameshift = fs;
                 }
+            } else if let Some(fs_pos) = allele_part.find("fsTer") {
+                allele = allele_part[..fs_pos].to_string();
+                let fs_part = &allele_part[fs_pos + "fsTer".len()..];
+                let indel_pos = fs_part.find("ins").or_else(|| fs_part.find("del"));
+                let fs_end = indel_pos.unwrap_or(fs_part.len());
+                if let Ok(fs) = fs_part[..fs_end].parse::<usize>() {
+                    frameshift = fs;
+                }
+                if let Some(indel_pos) = indel_pos {
+                    let indel = &fs_part[indel_pos..indel_pos + 3];
+                    if let Ok(count) = fs_part[indel_pos + 3..].parse::<i32>() {
+                        frameshift_insertion = if indel == "del" { -count } else { count };
+                    }
+                }
             } else {
                 allele = allele_part.to_string();
             }
+            allele = Self::normalize_allele(&allele);
         }
 
         (
@@ -142,6 +157,14 @@ impl AmrMutation {
             frameshift,
             frameshift_insertion,
         )
+    }
+
+    fn normalize_allele(allele: &str) -> String {
+        match allele {
+            "Ter" => "*".to_string(),
+            "del" => String::new(),
+            _ => allele.to_string(),
+        }
     }
 
     pub fn apply(&self, seq: &mut String) -> anyhow::Result<()> {
@@ -314,8 +337,62 @@ mod tests {
         );
         assert_eq!(m.gene, "nfsA");
         assert_eq!(m.reference, "K");
-        assert_eq!(m.allele, "Ter");
+        assert_eq!(m.allele, "*");
         assert_eq!(m.pos_std, 140); // 0-based: 141 - 1
+    }
+
+    #[test]
+    fn test_amr_mutation_parse_deletion() {
+        let m = AmrMutation::new(
+            5,
+            "pmrB_RPISLR6del",
+            "pmrB_RPISLR6del",
+            "COLISTIN",
+            "COLISTIN",
+            "name",
+        );
+        assert_eq!(m.gene, "pmrB");
+        assert_eq!(m.reference, "RPISLR");
+        assert_eq!(m.allele, "");
+        assert_eq!(m.pos_std, 5);
+        assert_eq!(m.frameshift, NO_INDEX);
+        assert_eq!(m.frameshift_insertion, 0);
+    }
+
+    #[test]
+    fn test_amr_mutation_parse_frameshift_insertion() {
+        let m = AmrMutation::new(
+            252,
+            "cirA_Y253CfsTer5ins1",
+            "cirA_Y253CfsTer5ins1",
+            "BETA-LACTAM",
+            "CEFIDEROCOL",
+            "name",
+        );
+        assert_eq!(m.gene, "cirA");
+        assert_eq!(m.reference, "Y");
+        assert_eq!(m.allele, "C");
+        assert_eq!(m.pos_std, 252);
+        assert_eq!(m.frameshift, 5);
+        assert_eq!(m.frameshift_insertion, 1);
+    }
+
+    #[test]
+    fn test_amr_mutation_parse_frameshift_deletion() {
+        let m = AmrMutation::new(
+            632,
+            "cirA_K633LfsTer8del2",
+            "cirA_K633LfsTer8del2",
+            "BETA-LACTAM",
+            "CEFIDEROCOL",
+            "name",
+        );
+        assert_eq!(m.gene, "cirA");
+        assert_eq!(m.reference, "K");
+        assert_eq!(m.allele, "L");
+        assert_eq!(m.pos_std, 632);
+        assert_eq!(m.frameshift, 8);
+        assert_eq!(m.frameshift_insertion, -2);
     }
 
     #[test]

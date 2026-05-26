@@ -6,9 +6,13 @@ description = "Rust implementation of NCBI AMRFinderPlus — antimicrobial resis
 license-file = "LICENSE"
 repository = "https://github.com/henriksson-lab/ncbi-amrfinderplus-rs"
 readme = "README.md"
-keywords = ["bioinformatics", "amr", "antimicrobial-resistance", "blast", "genomics"]
+keywords = ["bioinformatics", "amr", "resistance", "blast", "genomics"]
 categories = ["science", "command-line-utilities"]
-exclude = ["amr", "amrfinder_db", "target", "CLAUDE.md"]
+include = [
+    "/src/**/*.rs",
+    "/README.md",
+    "/LICENSE",
+]
 
 [[bin]]
 name = "amrfinder"
@@ -19,8 +23,7 @@ name = "amrfinder"
 path = "src/lib.rs"
 
 [dependencies]
-blast-rs = { path = "../newblast" }
-hmmer = { package = "hmmer-pure-rs", path = "../newhmmer" }
+hmmer = { package = "hmmer-pure-rs", version = "0.7" }
 ureq = "3"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"

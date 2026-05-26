@@ -99,7 +99,13 @@ impl BlastnAlignment {
         self.hsp.sseq.len() >= min_len
     }
 
-    fn report(&self, td: &mut TsvOut, mutation_all: bool, print_node: bool) -> Result<()> {
+    fn report(
+        &self,
+        td: &mut TsvOut,
+        mutation_all: bool,
+        print_node: bool,
+        name: &str,
+    ) -> Result<()> {
         for change in &self.seq_changes {
             let mutations: Vec<Option<&AmrMutation>> = if change.mutations.is_empty() {
                 vec![None]
@@ -111,7 +117,7 @@ impl BlastnAlignment {
                 {
                     continue;
                 }
-                self.report_change(td, change, mutation, print_node)?;
+                self.report_change(td, change, mutation, print_node, name)?;
             }
         }
         Ok(())
@@ -123,6 +129,7 @@ impl BlastnAlignment {
         change: &DnaSeqChange,
         mutation: Option<&AmrMutation>,
         print_node: bool,
+        name: &str,
     ) -> Result<()> {
         if change.is_wildtype && mutation.is_none() {
             return Ok(());
@@ -148,6 +155,9 @@ impl BlastnAlignment {
             format!("{} {} [UNKNOWN]", self.organism, self.product)
         };
 
+        if !name.is_empty() {
+            td.write_field(&name)?;
+        }
         td.write_field(&columns::NA)?; // Protein id
         td.write_field(&self.hsp.sseqid)?; // Contig
         td.write_field(&(self.hsp.s_int.start + 1))?; // Start
@@ -590,13 +600,9 @@ pub fn run_dna_mutation(
             if line.trim().is_empty() {
                 continue;
             }
-            match BlastnAlignment::parse(&line, organism, &accession2mutations) {
-                Ok(al) => {
-                    if al.good() {
-                        alignments.push(al);
-                    }
-                }
-                Err(_) => continue,
+            let al = BlastnAlignment::parse(&line, organism, &accession2mutations)?;
+            if al.good() {
+                alignments.push(al);
             }
         }
     }
@@ -638,7 +644,7 @@ pub fn run_dna_mutation(
         td.new_line()?;
 
         for al in &alignments {
-            al.report(&mut td, false, print_node)?;
+            al.report(&mut td, false, print_node, name)?;
         }
     }
 
@@ -679,7 +685,7 @@ pub fn run_dna_mutation(
         td.new_line()?;
 
         for al in &alignments {
-            al.report(&mut td, true, print_node)?;
+            al.report(&mut td, true, print_node, name)?;
         }
     }
 

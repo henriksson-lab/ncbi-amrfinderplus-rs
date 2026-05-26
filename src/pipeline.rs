@@ -10,6 +10,8 @@ use anyhow::{bail, Result};
 
 use crate::fasta_utils::{self, FastaCheckOpts};
 
+const HMMSEARCH_EFFECTIVE_Z: &str = "10000";
+
 /// Pipeline configuration
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
@@ -24,6 +26,7 @@ pub struct PipelineConfig {
     pub threads: usize,
     pub plus: bool,
     pub report_common: bool,
+    pub report_all_equal: bool,
     pub print_node: bool,
     pub mutation_all: Option<PathBuf>,
     pub annotation_format: String,
@@ -47,6 +50,7 @@ impl Default for PipelineConfig {
             threads: 4,
             plus: false,
             report_common: false,
+            report_all_equal: false,
             print_node: false,
             mutation_all: None,
             annotation_format: "genbank".to_string(),
@@ -72,6 +76,266 @@ impl PipelineConfig {
             Path::new(dir).join(name)
         }
     }
+}
+
+/// Split a FASTA file into at most `n` chunk files (round-robin by sequence)
+/// inside `out_dir`. Returns the paths of the chunks actually written.
+fn split_fasta(query: &Path, n: usize, out_dir: &Path) -> Result<Vec<PathBuf>> {
+    let content = fs::read_to_string(query)?;
+    let mut records: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for line in content.lines() {
+        if line.starts_with('>') && !cur.is_empty() {
+            records.push(std::mem::take(&mut cur));
+        }
+        cur.push_str(line);
+        cur.push('\n');
+    }
+    if !cur.is_empty() {
+        records.push(cur);
+    }
+
+    let n = n.max(1).min(records.len().max(1));
+    let mut buffers: Vec<String> = vec![String::new(); n];
+    for (idx, rec) in records.iter().enumerate() {
+        buffers[idx % n].push_str(rec);
+    }
+
+    let mut paths = Vec::with_capacity(n);
+    for (i, body) in buffers.into_iter().enumerate() {
+        let path = out_dir.join(format!("chunk{i}"));
+        fs::write(&path, body)?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// Run hmmsearch the way the C++ amrfinder does (amrfinder.cpp:1226-1243).
+///
+/// HMMER's internal `--cpu N` threading scales poorly on the AMR workload
+/// (small query, ~780 models): measured ~4x slower than `--cpu 0`. So when
+/// there is enough work to parallelize, split the query into `threads` chunks
+/// and run that many single-threaded (`--cpu 0`) hmmsearch processes in
+/// parallel, then concatenate the per-chunk tblout/domtblout outputs (the
+/// report parser skips the `#` comment blocks). Otherwise fall back to a
+/// single process with `--cpu (threads-1)`.
+#[allow(clippy::too_many_arguments)]
+fn run_hmmsearch(
+    hmm_prog: &Path,
+    hmm_lib: &str,
+    query: &Path,
+    n_prot: usize,
+    threads: usize,
+    tblout: &Path,
+    domtblout: &Path,
+    work_dir: &Path,
+) -> Result<()> {
+    if threads > 1 && n_prot > threads / 2 {
+        let chunk_dir = work_dir.join("hmm_chunk");
+        fs::create_dir_all(&chunk_dir)?;
+        let chunks = split_fasta(query, threads, &chunk_dir)?;
+
+        let mut handles = Vec::with_capacity(chunks.len());
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let prog = hmm_prog.to_path_buf();
+            let lib = hmm_lib.to_string();
+            let chunk_tbl = work_dir.join(format!("hmm_tbl_{i}"));
+            let chunk_dom = work_dir.join(format!("hmm_dom_{i}"));
+            let tbl = chunk_tbl.clone();
+            let dom = chunk_dom.clone();
+            let handle = std::thread::spawn(move || -> Result<()> {
+                let status = Command::new(&prog)
+                    .args([
+                        "--noali",
+                        "--cut_tc",
+                        "-Z",
+                        HMMSEARCH_EFFECTIVE_Z,
+                        "--cpu",
+                        "0",
+                        "--tblout",
+                        chunk_tbl.to_str().unwrap(),
+                        "--domtblout",
+                        chunk_dom.to_str().unwrap(),
+                        &lib,
+                        chunk.to_str().unwrap(),
+                    ])
+                    .stderr(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .status()?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    bail!("hmmsearch failed")
+                }
+            });
+            handles.push((tbl, dom, handle));
+        }
+
+        // Concatenate chunk outputs in order once each process finishes.
+        let mut tbl_out = File::create(tblout)?;
+        let mut dom_out = File::create(domtblout)?;
+        for (tbl, dom, handle) in handles {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("hmmsearch thread panicked"))??;
+            std::io::copy(&mut File::open(&tbl)?, &mut tbl_out)?;
+            std::io::copy(&mut File::open(&dom)?, &mut dom_out)?;
+        }
+        Ok(())
+    } else {
+        let cpu = threads.saturating_sub(1).to_string();
+        let status = Command::new(hmm_prog)
+            .args([
+                "--noali",
+                "--cut_tc",
+                "-Z",
+                HMMSEARCH_EFFECTIVE_Z,
+                "--cpu",
+                &cpu,
+                "--tblout",
+                tblout.to_str().unwrap(),
+                "--domtblout",
+                domtblout.to_str().unwrap(),
+                hmm_lib,
+                query.to_str().unwrap(),
+            ])
+            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("hmmsearch failed")
+        }
+    }
+}
+
+/// Run tblastn the way the C++ amrfinder does (amrfinder.cpp:1283-1300).
+///
+/// `tblastn -subject` does not benefit from `-num_threads`, so when more than
+/// one thread is available, split the protein query into `threads` chunks and
+/// run that many tblastn processes in parallel, then concatenate the outputs
+/// (outfmt 6 has no comment lines). Each query sequence is scored independently
+/// against the fixed `-dbsize`, so splitting does not change results.
+fn run_tblastn(
+    blast_prog: &Path,
+    query: &str,
+    subject: &Path,
+    gencode: u32,
+    threads: usize,
+    out: &Path,
+    work_dir: &Path,
+) -> Result<()> {
+    let gencode = gencode.to_string();
+    let run_one = |query: &str, out: &Path| -> Result<()> {
+        let status = Command::new(blast_prog)
+            .args([
+                "-query",
+                query,
+                "-subject",
+                subject.to_str().unwrap(),
+                "-comp_based_stats",
+                "0",
+                "-seg",
+                "no",
+                "-max_target_seqs",
+                "10000",
+                "-dbsize",
+                "10000",
+                "-evalue",
+                "1e-10",
+                "-word_size",
+                "5",
+                "-task",
+                "tblastn-fast",
+                "-window_size",
+                "15",
+                "-threshold",
+                "100",
+                "-db_gencode",
+                &gencode,
+                "-outfmt",
+                "6 qseqid sseqid qstart qend qlen sstart send slen qseq sseq",
+                "-out",
+                out.to_str().unwrap(),
+            ])
+            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("tblastn failed")
+        }
+    };
+
+    if threads <= 1 {
+        return run_one(query, out);
+    }
+
+    let chunk_dir = work_dir.join("AMRProt_chunk");
+    fs::create_dir_all(&chunk_dir)?;
+    let chunks = split_fasta(Path::new(query), threads, &chunk_dir)?;
+
+    let mut handles = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let prog = blast_prog.to_path_buf();
+        let subject = subject.to_path_buf();
+        let gencode = gencode.clone();
+        let chunk_out = work_dir.join(format!("tblastn_{i}"));
+        let out_ret = chunk_out.clone();
+        let handle = std::thread::spawn(move || -> Result<()> {
+            let status = Command::new(&prog)
+                .args([
+                    "-query",
+                    chunk.to_str().unwrap(),
+                    "-subject",
+                    subject.to_str().unwrap(),
+                    "-comp_based_stats",
+                    "0",
+                    "-seg",
+                    "no",
+                    "-max_target_seqs",
+                    "10000",
+                    "-dbsize",
+                    "10000",
+                    "-evalue",
+                    "1e-10",
+                    "-word_size",
+                    "5",
+                    "-task",
+                    "tblastn-fast",
+                    "-window_size",
+                    "15",
+                    "-threshold",
+                    "100",
+                    "-db_gencode",
+                    &gencode,
+                    "-outfmt",
+                    "6 qseqid sseqid qstart qend qlen sstart send slen qseq sseq",
+                    "-out",
+                    chunk_out.to_str().unwrap(),
+                ])
+                .stderr(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                bail!("tblastn failed")
+            }
+        });
+        handles.push((out_ret, handle));
+    }
+
+    let mut out_file = File::create(out)?;
+    for (chunk_out, handle) in handles {
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("tblastn thread panicked"))??;
+        std::io::copy(&mut File::open(&chunk_out)?, &mut out_file)?;
+    }
+    Ok(())
 }
 
 /// Run the AMRFinder pipeline
@@ -142,29 +406,24 @@ pub fn run_pipeline(config: &PipelineConfig) -> Result<String> {
         let dom_out = tmp.join("dom");
         let hmm_prog = config.find_prog("hmmsearch");
         let hmm_lib = format!("{}/AMR.LIB", db);
-        let prot_for_hmm = prot_path.to_str().unwrap().to_string();
-        let hmmsearch_out_clone = hmmsearch_out.clone();
-        let dom_out_clone = dom_out.clone();
+        let hmm_query = prot_path.to_path_buf();
+        let hmm_tbl = hmmsearch_out.clone();
+        let hmm_dom = dom_out.clone();
+        let hmm_work = tmp.to_path_buf();
+        let hmm_threads = config.threads;
+        let hmm_n_prot = n_prot;
 
-        let hmm_handle = std::thread::spawn(move || {
-            let status = Command::new(&hmm_prog)
-                .args([
-                    "--noali",
-                    "--tblout",
-                    hmmsearch_out_clone.to_str().unwrap(),
-                    "--domtblout",
-                    dom_out_clone.to_str().unwrap(),
-                    &hmm_lib,
-                    &prot_for_hmm,
-                ])
-                .stderr(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .status()?;
-            if status.success() {
-                Ok(())
-            } else {
-                bail!("hmmsearch failed")
-            }
+        let hmm_handle = std::thread::spawn(move || -> Result<()> {
+            run_hmmsearch(
+                &hmm_prog,
+                &hmm_lib,
+                &hmm_query,
+                hmm_n_prot,
+                hmm_threads,
+                &hmm_tbl,
+                &hmm_dom,
+                &hmm_work,
+            )
         });
 
         let blastp_output = Command::new(&blastp_prog)
@@ -256,47 +515,19 @@ pub fn run_pipeline(config: &PipelineConfig) -> Result<String> {
         let blastx_out = tmp.join("blastx");
 
         if use_tblastn {
-            // tblastn: protein query vs translated nucleotide DB
-            let blast_status = Command::new(&blast_prog)
-                .args([
-                    "-query",
-                    &format!("{}/AMRProt.fa", db),
-                    "-subject",
-                    dna_path.to_str().unwrap(),
-                    "-comp_based_stats",
-                    "0",
-                    "-seg",
-                    "no",
-                    "-max_target_seqs",
-                    "10000",
-                    "-dbsize",
-                    "10000",
-                    "-evalue",
-                    "1e-10",
-                    "-word_size",
-                    "5",
-                    "-task",
-                    "tblastn-fast",
-                    "-window_size",
-                    "15",
-                    "-threshold",
-                    "100",
-                    "-db_gencode",
-                    &config.translation_table.to_string(),
-                    "-num_threads",
-                    &config.threads.to_string(),
-                    "-outfmt",
-                    "6 qseqid sseqid qstart qend qlen sstart send slen qseq sseq",
-                    "-out",
-                    blastx_out.to_str().unwrap(),
-                ])
-                .stderr(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .status()?;
-
-            if !blast_status.success() {
-                bail!("{} failed", blast_prog_name);
-            }
+            // tblastn: protein query (AMRProt.fa) vs translated nucleotide subject.
+            // `-subject` mode does not parallelize via -num_threads, so the C++
+            // amrfinder splits the query across processes instead (amrfinder.cpp
+            // :1283-1300). Replicate that here.
+            run_tblastn(
+                &blast_prog,
+                &format!("{}/AMRProt.fa", db),
+                dna_path,
+                config.translation_table,
+                config.threads,
+                &blastx_out,
+                tmp,
+            )?;
         } else {
             // blastx: nucleotide query vs protein DB
             let blast_threads = std::cmp::min(
@@ -503,7 +734,9 @@ fn run_rust_amr_report(
         ident_min: config.ident_min,
         print_node: config.print_node,
         mutation_all: config.mutation_all.as_deref(),
+        name: &config.name,
         report_core_only: !config.plus,
+        report_all_equal: config.report_all_equal,
         cds_exist,
     };
 
@@ -520,7 +753,7 @@ fn run_rust_amr_report(
         if blastn_file.exists() && dna_tsv_path.exists() {
             let mut dna_output = Vec::new();
             let mut mutation_all_output = Vec::new();
-            if crate::dna_mutation::run_dna_mutation(
+            crate::dna_mutation::run_dna_mutation(
                 &blastn_file,
                 &dna_tsv_path,
                 &config.organism,
@@ -531,26 +764,23 @@ fn run_rust_amr_report(
                     .mutation_all
                     .as_ref()
                     .map(|_| &mut mutation_all_output as &mut dyn std::io::Write),
-            )
-            .is_ok()
-            {
-                let snp_output = String::from_utf8_lossy(&dna_output);
-                for (i, line) in snp_output.lines().enumerate() {
-                    if i > 0 && !line.is_empty() {
-                        raw_result.push_str(line);
-                        raw_result.push('\n');
-                    }
+            )?;
+            let snp_output = String::from_utf8_lossy(&dna_output);
+            for (i, line) in snp_output.lines().enumerate() {
+                if i > 0 && !line.is_empty() {
+                    raw_result.push_str(line);
+                    raw_result.push('\n');
                 }
-                if let Some(path) = &config.mutation_all {
-                    let has_existing_rows = path.exists() && fs::metadata(path)?.len() > 0;
-                    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-                    let mutation_all_output = String::from_utf8_lossy(&mutation_all_output);
-                    for (i, line) in mutation_all_output.lines().enumerate() {
-                        if line.is_empty() || (has_existing_rows && i == 0) {
-                            continue;
-                        }
-                        writeln!(file, "{line}")?;
+            }
+            if let Some(path) = &config.mutation_all {
+                let has_existing_rows = path.exists() && fs::metadata(path)?.len() > 0;
+                let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+                let mutation_all_output = String::from_utf8_lossy(&mutation_all_output);
+                for (i, line) in mutation_all_output.lines().enumerate() {
+                    if line.is_empty() || (has_existing_rows && i == 0) {
+                        continue;
                     }
+                    writeln!(file, "{line}")?;
                 }
             }
         }
@@ -576,24 +806,136 @@ fn append_stx_operon_row(raw_result: &mut String) {
         return;
     }
 
-    let mut has_stx_a = false;
-    let mut has_stx_b = false;
-    for line in raw_result.lines().skip(1) {
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 23 {
-            continue;
-        }
-        if fields[1] == "contig18" && fields[5] == "stxA2" && fields[18] == "TJA36680.1" {
-            has_stx_a = true;
-        }
-        if fields[1] == "contig18" && fields[5] == "stxB2" && fields[18] == "AAM90978.1" {
-            has_stx_b = true;
-        }
+    #[derive(Clone)]
+    struct StxSubunit {
+        contig: String,
+        start: usize,
+        stop: usize,
+        strand: String,
+        accession: String,
+        node: String,
+        name: Option<String>,
+        align_len: usize,
     }
 
-    if has_stx_a && has_stx_b {
-        raw_result.push_str("NA\tcontig18\t279\t1516\t+\tstx2a_operon\tstx2a operon\tplus\tVIRULENCE\tSTX_TYPE\tSTX2\tSTX2A\tCOMPLETE\t1238\tNA\tNA\t100.00\t408\tAAS07600.1,AAM90978.1\tShiga toxin stx2a\tNA\tNA\tstxA2a::stxB2a\n");
+    let Some(header) = raw_result.lines().next() else {
+        return;
+    };
+    let header_fields: Vec<&str> = header.split('\t').collect();
+    let col = |name: &str| header_fields.iter().position(|field| *field == name);
+    let Some(contig_col) = col(crate::columns::CONTIG_COL_NAME) else {
+        return;
+    };
+    let Some(start_col) = col(crate::columns::START_COL_NAME) else {
+        return;
+    };
+    let Some(stop_col) = col(crate::columns::STOP_COL_NAME) else {
+        return;
+    };
+    let Some(strand_col) = col(crate::columns::STRAND_COL_NAME) else {
+        return;
+    };
+    let Some(symbol_col) = col(crate::columns::GENESYMBOL_COL_NAME) else {
+        return;
+    };
+    let Some(accession_col) = col(crate::columns::CLOSEST_REF_ACCESSION_COL_NAME) else {
+        return;
+    };
+    let Some(align_len_col) = col(crate::columns::ALIGN_LEN_COL_NAME) else {
+        return;
+    };
+    let name_col = col("Name");
+    let node_col = col(crate::columns::HIERARCHY_NODE_COL_NAME);
+
+    let mut stx_a = None;
+    let mut stx_b = None;
+    for line in raw_result.lines().skip(1) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let Some(symbol) = fields.get(symbol_col).copied() else {
+            continue;
+        };
+        if symbol != "stxA2" && symbol != "stxB2" {
+            continue;
+        }
+        let Some(contig) = fields.get(contig_col).copied() else {
+            continue;
+        };
+        let Some(strand) = fields.get(strand_col).copied() else {
+            continue;
+        };
+        let Some(accession) = fields.get(accession_col).copied() else {
+            continue;
+        };
+        let Some(start) = fields.get(start_col).and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let Some(stop) = fields.get(stop_col).and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let align_len = fields
+            .get(align_len_col)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let node = node_col
+            .and_then(|idx| fields.get(idx).copied())
+            .unwrap_or(crate::columns::NA)
+            .to_string();
+        let name = name_col
+            .and_then(|idx| fields.get(idx).copied())
+            .map(str::to_string);
+        let subunit = StxSubunit {
+            contig: contig.to_string(),
+            start,
+            stop,
+            strand: strand.to_string(),
+            accession: accession.to_string(),
+            node,
+            name,
+            align_len,
+        };
+        if symbol == "stxA2" {
+            stx_a = Some(subunit);
+        } else {
+            stx_b = Some(subunit);
+        };
     }
+
+    let (Some(stx_a), Some(stx_b)) = (stx_a, stx_b) else {
+        return;
+    };
+    if stx_a.contig != stx_b.contig || stx_a.strand != stx_b.strand {
+        return;
+    }
+
+    let start = stx_a.start.min(stx_b.start);
+    let stop = stx_a.stop.max(stx_b.stop);
+    let target_len = stop.saturating_sub(start).saturating_add(1);
+    let align_len = stx_a.align_len + stx_b.align_len;
+    let node = format!(
+        "{}{}{}",
+        stx_a.node,
+        crate::columns::FUSION_INFIX,
+        stx_b.node
+    );
+    let name_prefix = stx_a
+        .name
+        .as_ref()
+        .map(|name| format!("{name}\t"))
+        .unwrap_or_default();
+    let row = format!(
+        "{}NA\t{}\t{}\t{}\t{}\tstx2a_operon\tstx2a operon\tplus\tVIRULENCE\tSTX_TYPE\tSTX2\tSTX2A\tCOMPLETE\t{}\tNA\tNA\t100.00\t{}\t{},{}\tShiga toxin stx2a\tNA\tNA\t{}\n",
+        name_prefix,
+        stx_a.contig,
+        start,
+        stop,
+        stx_a.strand,
+        target_len,
+        align_len,
+        stx_a.accession,
+        stx_b.accession,
+        node
+    );
+    raw_result.push_str(&row);
 }
 
 /// Sort the TSV output to match C++ amrfinder's post-processing
@@ -705,9 +1047,8 @@ mod tests {
 
         append_stx_operon_row(&mut output);
         assert!(output.contains("\tstx2a_operon\t"));
-        assert!(
-            output.contains("\tAAS07600.1,AAM90978.1\tShiga toxin stx2a\tNA\tNA\tstxA2a::stxB2a\n")
-        );
+        assert!(output
+            .contains("\tTJA36680.1,AAM90978.1\tShiga toxin stx2a\tNA\tNA\tstxA2_acd::stxB2a\n"));
 
         let once = output.clone();
         append_stx_operon_row(&mut output);
@@ -724,9 +1065,10 @@ mod tests {
         .to_string();
 
         append_stx_operon_row(&mut output);
+        assert!(output.contains("\tstx2a_operon\t"));
         assert!(
-            !output.contains("\tstx2a_operon\t"),
-            "reference names that look like accessions must not trigger synthesis"
+            output.contains("\tWRONG,WRONG\tShiga toxin stx2a\tNA\tNA\tstxA2_acd::stxB2a\n"),
+            "operon synthesis should read accession columns, not reference-name columns"
         );
     }
 }

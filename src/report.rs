@@ -298,6 +298,10 @@ pub struct Batch {
     pub fam_map: HashMap<String, Fam>,
     pub hmm2fam: HashMap<String, String>, // hmm_id -> fam_id
     pub reportable_min: u8,
+    pub ident_min: f64,
+    pub coverage_min: f64,
+    pub report_all_equal: bool,
+    pub name: String,
     pub cds_exist: bool,
     pub suppress_prots: Vec<String>,
     pub blast_als: Vec<BlastAlignment>,
@@ -395,6 +399,10 @@ impl Batch {
             fam_map,
             hmm2fam,
             reportable_min,
+            ident_min: -1.0,
+            coverage_min: 0.5,
+            report_all_equal: false,
+            name: String::new(),
             cds_exist: false,
             suppress_prots: Vec::new(),
             blast_als: Vec::new(),
@@ -628,7 +636,7 @@ impl Batch {
                 .iter()
                 .filter(|&&idx| {
                     let al = &self.blast_als[idx];
-                    al.from_hmm || al.good()
+                    al.from_hmm || (al.good() && self.passes_user_thresholds(al))
                 })
                 .copied()
                 .collect();
@@ -654,7 +662,11 @@ impl Batch {
         let targets: Vec<String> = self.target2good_blast_als.keys().cloned().collect();
         for target in &targets {
             if let Some(indices) = self.target2good_blast_als.get(target) {
-                let filtered = self.pareto_filter_blast(indices);
+                let filtered = if self.report_all_equal {
+                    indices.clone()
+                } else {
+                    self.pareto_filter_blast(indices)
+                };
                 self.target2good_blast_als.insert(target.clone(), filtered);
             }
         }
@@ -662,39 +674,39 @@ impl Batch {
         self.mark_protein_internal_stops_from_blastx();
         self.suppress_blastx_overlapping_proteins();
 
-        // Step 4: HMM suppression by BLAST
-        // If a BLAST hit has higher identity than HMM, suppress the HMM-based alignment
-        // (simplified — full logic is more complex)
-        let targets: Vec<String> = self.target2good_blast_als.keys().cloned().collect();
-        for target in &targets {
-            if let Some(blast_indices) = self.target2good_blast_als.get(target) {
-                let hmm_indices = self.target2good_hmm_als.get(target);
-                if hmm_indices.is_none() {
-                    continue;
-                }
+        if !self.report_all_equal {
+            // Step 4: HMM suppression by BLAST
+            // If a BLAST hit has higher identity than HMM, suppress the HMM-based alignment.
+            let targets: Vec<String> = self.target2good_blast_als.keys().cloned().collect();
+            for target in &targets {
+                if let Some(blast_indices) = self.target2good_blast_als.get(target) {
+                    let hmm_indices = self.target2good_hmm_als.get(target);
+                    if hmm_indices.is_none() {
+                        continue;
+                    }
 
-                // Remove HMM-based blast alignments if a better non-HMM blast exists
-                let mut new_indices = Vec::new();
-                for &idx in blast_indices {
-                    let al = &self.blast_als[idx];
-                    if al.from_hmm {
-                        // Check if there's a non-HMM blast with same fam that's better
-                        let dominated = blast_indices.iter().any(|&other_idx| {
-                            let other = &self.blast_als[other_idx];
-                            !other.from_hmm
-                                && other.fam_id == al.fam_id
-                                && other.hsp.rel_identity() >= al.hsp.rel_identity()
-                                && other.hsp.q_rel_coverage() >= al.hsp.q_rel_coverage()
-                        });
-                        if !dominated {
+                    // Remove HMM-based blast alignments if a better non-HMM blast exists.
+                    let mut new_indices = Vec::new();
+                    for &idx in blast_indices {
+                        let al = &self.blast_als[idx];
+                        if al.from_hmm {
+                            let dominated = blast_indices.iter().any(|&other_idx| {
+                                let other = &self.blast_als[other_idx];
+                                !other.from_hmm
+                                    && other.fam_id == al.fam_id
+                                    && other.hsp.rel_identity() >= al.hsp.rel_identity()
+                                    && other.hsp.q_rel_coverage() >= al.hsp.q_rel_coverage()
+                            });
+                            if !dominated {
+                                new_indices.push(idx);
+                            }
+                        } else {
                             new_indices.push(idx);
                         }
-                    } else {
-                        new_indices.push(idx);
                     }
+                    self.target2good_blast_als
+                        .insert(target.clone(), new_indices);
                 }
-                self.target2good_blast_als
-                    .insert(target.clone(), new_indices);
             }
         }
     }
@@ -747,6 +759,16 @@ impl Batch {
                 self.blast_als[idx].hsp.s_internal_stop = true;
             }
         }
+    }
+
+    fn passes_user_thresholds(&self, al: &BlastAlignment) -> bool {
+        if self.ident_min >= 0.0 && al.hsp.rel_identity() < self.ident_min {
+            return false;
+        }
+        if self.coverage_min >= 0.0 && al.hsp.q_rel_coverage() < self.coverage_min {
+            return false;
+        }
+        true
     }
 
     fn suppress_blastx_overlapping_proteins(&mut self) {
@@ -1041,6 +1063,9 @@ impl Batch {
     }
 
     fn write_header(&self, tsv: &mut TsvOut, print_node: bool) -> Result<()> {
+        if !self.name.is_empty() {
+            tsv.write_field(&"Name")?;
+        }
         tsv.write_field(&crate::columns::PROT_COL_NAME)?;
         if self.cds_exist {
             tsv.write_field(&crate::columns::CONTIG_COL_NAME)?;
@@ -1141,12 +1166,6 @@ impl Batch {
             if cds.at_contig_start() || cds.at_contig_stop() {
                 return format!("PARTIAL_CONTIG_END{}", suffix);
             }
-        }
-        if al.hsp.s_prot
-            && self.blast_als.iter().any(|candidate| !candidate.hsp.s_prot)
-            && (al.hsp.sseqid.contains("_partial_3p") || al.hsp.sseqid.contains("_partial_5p"))
-        {
-            return format!("PARTIAL_CONTIG_END{}", suffix);
         }
 
         format!("PARTIAL{}", suffix)
@@ -1319,6 +1338,10 @@ impl Batch {
         let is_mutation = al.resistance == "mutation";
 
         let is_exact = (al.hsp.rel_identity() - 1.0).abs() < 1e-6 && al.hsp.q_complete();
+
+        if !self.name.is_empty() {
+            tsv.write_field(&self.name)?;
+        }
         // Product name: exact/allele uses product, others use match family name
         let product_name = if is_mutation && !al.ref_mutation.empty() {
             al.ref_mutation.name.replace('_', " ")
@@ -1668,6 +1691,10 @@ impl Batch {
     ) -> Result<()> {
         let na = crate::columns::NA;
         let mutation = change.mutation.as_ref();
+
+        if !self.name.is_empty() {
+            tsv.write_field(&self.name)?;
+        }
 
         if al.hsp.s_prot {
             tsv.write_field(&al.hsp.sseqid)?;

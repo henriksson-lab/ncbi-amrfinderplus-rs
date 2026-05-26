@@ -96,6 +96,11 @@ impl AmrFinderBuilder {
         self
     }
 
+    pub fn report_all_equal(mut self, report_all_equal: bool) -> Self {
+        self.config.report_all_equal = report_all_equal;
+        self
+    }
+
     pub fn print_node(mut self, print_node: bool) -> Self {
         self.config.print_node = print_node;
         self
