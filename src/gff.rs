@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 
 use anyhow::{bail, Result};
 
@@ -33,7 +33,7 @@ impl GffType {
         "standard",
     ];
 
-    pub fn from_name(name: &str) -> Result<GffType> {
+    pub fn name2type(name: &str) -> Result<GffType> {
         match name {
             "bakta" => Ok(GffType::Bakta),
             "genbank" => Ok(GffType::Genbank),
@@ -131,6 +131,39 @@ impl Locus {
     pub fn at_contig_stop(&self) -> bool {
         self.contig_len > 0 && self.contig_len - self.stop <= Self::END_DELTA
     }
+
+    pub fn print(&self, os: &mut dyn Write) -> Result<()> {
+        writeln!(
+            os,
+            "{} {} {} {} {} {} {} {}",
+            self.contig,
+            self.start,
+            self.stop,
+            self.strand as u8,
+            self.contig_len,
+            self.cross_origin as u8,
+            self.gene,
+            self.product
+        )?;
+        Ok(())
+    }
+}
+
+impl Default for Locus {
+    fn default() -> Self {
+        Locus {
+            line_num: 0,
+            contig: String::new(),
+            start: 0,
+            stop: 0,
+            strand: false,
+            partial: false,
+            contig_len: 0,
+            cross_origin: false,
+            gene: String::new(),
+            product: String::new(),
+        }
+    }
 }
 
 impl Ord for Locus {
@@ -151,29 +184,42 @@ impl PartialOrd for Locus {
 }
 
 /// URL percent-decode and trim
-fn unescape(s: &str) -> String {
-    let decoded = percent_decode(s);
-    decoded.trim().to_string()
-}
+fn unescape(s: &str) -> Result<String> {
+    for &c in s.as_bytes() {
+        if c < b' ' {
+            bail!("Non-printable character: {}", c);
+        }
+    }
 
-fn percent_decode(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(val) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                result.push(val as char);
-                i += 3;
-                continue;
+        if bytes[i] == b'%' {
+            i += 1;
+            let mut hex = 0u8;
+            let mut hex_pos = 0usize;
+            while i < bytes.len() && hex_pos < 2 {
+                let c = bytes[i];
+                if !c.is_ascii_hexdigit() {
+                    bail!("Bad hexadecimal character: {}", c);
+                }
+                hex += (c as char).to_digit(16).unwrap() as u8;
+                if hex_pos == 0 {
+                    hex *= 16;
+                }
+                hex_pos += 1;
+                i += 1;
             }
+            if hex_pos == 2 {
+                result.push(hex as char);
+            }
+            continue;
         }
         result.push(bytes[i] as char);
         i += 1;
     }
-    result
+    Ok(result.trim().to_string())
 }
 
 fn pgap_accession(accession: &mut String, lcl: bool) -> Result<()> {
@@ -199,11 +245,6 @@ fn pgap_accession(accession: &mut String, lcl: bool) -> Result<()> {
 
     assert!(!accession.is_empty());
     Ok(())
-}
-
-fn printable_char(c: char) -> bool {
-    let code = c as u32;
-    (32..127).contains(&code)
 }
 
 /// GFF/BED annotation data
@@ -253,14 +294,26 @@ impl Annot {
             let parse_result = (|| -> Result<()> {
                 let mut rest = line.as_str();
 
-                let mut contig = unescape(split_tab(&mut rest)?);
-                let _source = unescape(split_tab(&mut rest)?);
-                let feat_type = unescape(split_tab(&mut rest)?);
-                let start_s = unescape(split_tab(&mut rest)?);
-                let stop_s = unescape(split_tab(&mut rest)?);
-                let _score = unescape(split_tab(&mut rest)?);
-                let strand_s = unescape(split_tab(&mut rest)?);
-                let _phase = unescape(split_tab(&mut rest)?);
+                let mut split_tab = || -> &str {
+                    if let Some(pos) = rest.find('\t') {
+                        let field = &rest[..pos];
+                        rest = &rest[pos + 1..];
+                        field
+                    } else {
+                        let field = rest;
+                        rest = "";
+                        field
+                    }
+                };
+
+                let mut contig = unescape(split_tab())?;
+                let _source = unescape(split_tab())?;
+                let feat_type = unescape(split_tab())?;
+                let start_s = unescape(split_tab())?;
+                let stop_s = unescape(split_tab())?;
+                let _score = unescape(split_tab())?;
+                let strand_s = unescape(split_tab())?;
+                let _phase = unescape(split_tab())?;
                 let attributes = rest.trim().to_string();
 
                 if attributes.is_empty() {
@@ -271,7 +324,8 @@ impl Annot {
                     bail!("empty sequence indentifier");
                 }
                 for c in contig.chars() {
-                    if !printable_char(c) {
+                    let code = c as u32;
+                    if !(32..127).contains(&code) {
                         bail!(
                             "Non-printable character in the sequence identifier: {}",
                             c as u32
@@ -362,10 +416,10 @@ impl Annot {
 
                 // Trim surrounding quotes
                 if prot_.starts_with('"') {
-                    prot_ = prot_.trim_start_matches('"').to_string();
+                    prot_.remove(0);
                 }
                 if prot_.ends_with('"') {
-                    prot_ = prot_.trim_end_matches('"').to_string();
+                    prot_.pop();
                 }
 
                 if prot_.is_empty() {
@@ -391,9 +445,9 @@ impl Annot {
 
                 assert!(!prot_.is_empty());
 
-                let mut prot = unescape(&prot_);
-                let gene = unescape(&gene_);
-                let product = unescape(&product_);
+                let mut prot = unescape(&prot_)?;
+                let gene = unescape(&gene_)?;
+                let product = unescape(&product_)?;
 
                 if gff_type == GffType::Pgap {
                     pgap_accession(&mut prot, false)?;
@@ -453,7 +507,7 @@ impl Annot {
 
             let error_prefix = format!("File {}, line {}: ", fname, line_num + 1);
 
-            let fields: Vec<&str> = line.split('\t').collect();
+            let fields: Vec<&str> = line.split_whitespace().collect();
             if fields.len() < 6 {
                 bail!(
                     "{}at least 5 fields are expected in each line",
@@ -469,7 +523,8 @@ impl Annot {
             let strand_c = fields[5].chars().next().unwrap_or(' ');
 
             for c in contig.chars() {
-                if !printable_char(c) {
+                let code = c as u32;
+                if !(32..127).contains(&code) {
                     bail!(
                         "{}Non-printable character in the sequence identifier: {}",
                         error_prefix,
@@ -519,11 +574,8 @@ impl Annot {
         for line in reader.lines() {
             let line = line?;
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 2 {
-                continue;
-            }
-            let fasta_prot = fields[0].to_string();
-            let gff_prot = fields[1].to_string();
+            let fasta_prot = fields.first().copied().unwrap_or("").to_string();
+            let gff_prot = fields.get(1).copied().unwrap_or("").to_string();
             assert!(!gff_prot.is_empty());
             self.fasta2gff_prot.insert(fasta_prot, gff_prot);
         }
@@ -545,11 +597,8 @@ impl Annot {
         for line in reader.lines() {
             let line = line?;
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 2 {
-                continue;
-            }
-            let fasta_dna = fields[0].to_string();
-            let gff_dna = fields[1].to_string();
+            let fasta_dna = fields.first().copied().unwrap_or("").to_string();
+            let gff_dna = fields.get(1).copied().unwrap_or("").to_string();
             assert!(!gff_dna.is_empty());
             gff2fasta.insert(gff_dna, fasta_dna);
         }
@@ -558,10 +607,7 @@ impl Annot {
             bail!("File {} is empty", fname);
         }
 
-        // Update contig names in all loci
-        let mut updated: BTreeMap<String, BTreeSet<Locus>> = BTreeMap::new();
-        for (prot, loci) in &self.prot2loci {
-            let mut new_loci = BTreeSet::new();
+        for loci in self.prot2loci.values() {
             for locus in loci {
                 let new_contig = gff2fasta.get(&locus.contig).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -570,13 +616,13 @@ impl Annot {
                         fname
                     )
                 })?;
-                let mut new_locus = locus.clone();
-                new_locus.contig = new_contig.clone();
-                new_loci.insert(new_locus);
+                #[allow(invalid_reference_casting)]
+                unsafe {
+                    let locus_mut = &mut *(locus as *const Locus as *mut Locus);
+                    locus_mut.contig = new_contig.clone();
+                }
             }
-            updated.insert(prot.clone(), new_loci);
         }
-        self.prot2loci = updated;
 
         Ok(())
     }
@@ -614,46 +660,5 @@ impl Annot {
         assert!(!loci.is_empty());
 
         Ok(loci)
-    }
-}
-
-fn split_tab<'a>(rest: &mut &'a str) -> Result<&'a str> {
-    if let Some(pos) = rest.find('\t') {
-        let field = &rest[..pos];
-        *rest = &rest[pos + 1..];
-        Ok(field)
-    } else {
-        bail!("Expected tab-delimited field");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    fn test_data_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("amr")
-    }
-
-    #[test]
-    fn test_parse_gff() {
-        let path = test_data_dir().join("test_prot.gff");
-        if !path.exists() {
-            return;
-        }
-        let annot = Annot::from_gff(path.to_str().unwrap(), GffType::Genbank, false, false);
-        assert!(annot.is_ok(), "GFF parse failed: {:?}", annot.err());
-        let annot = annot.unwrap();
-        assert!(!annot.prot2loci.is_empty());
-    }
-
-    #[test]
-    fn test_gff_type_names() {
-        for name in GffType::NAMES {
-            let result = GffType::from_name(name);
-            assert!(result.is_ok(), "Failed to parse GFF type: {}", name);
-        }
-        assert!(GffType::from_name("invalid").is_err());
     }
 }

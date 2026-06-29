@@ -18,13 +18,47 @@ include = [
 name = "amrfinder"
 path = "src/main.rs"
 
+[[bin]]
+name = "fasta_check"
+path = "src/bin/fasta_check.rs"
+
+[[bin]]
+name = "fasta2parts"
+path = "src/bin/fasta2parts.rs"
+
+[[bin]]
+name = "fasta_extract"
+path = "src/bin/fasta_extract.rs"
+
+[[bin]]
+name = "amrfinder_index"
+path = "src/bin/amrfinder_index.rs"
+
+[[bin]]
+name = "amrfinder_update"
+path = "src/bin/amrfinder_update.rs"
+
+[[bin]]
+name = "gff_check"
+path = "src/bin/gff_check.rs"
+
+[[bin]]
+name = "mutate"
+path = "src/bin/mutate.rs"
+
+[[bin]]
+name = "disruption2genesymbol"
+path = "src/bin/disruption2genesymbol.rs"
+
+[[bin]]
+name = "dna_mutation"
+path = "src/bin/dna_mutation.rs"
+
 [lib]
 name = "amrfinder"
 path = "src/lib.rs"
 
 [dependencies]
-hmmer = { package = "hmmer-pure-rs", version = "0.7" }
-ureq = "3"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 anyhow = "1"

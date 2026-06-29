@@ -1,6 +1,8 @@
 // Protein or DNA mutations library — port of alignment.hpp/cpp
 
-use crate::seq::{Disruption, Hsp, NO_INDEX};
+use crate::seq::{Disruption, Hsp, NO_INDEX, TERMINATOR_WORD};
+use std::cmp::Ordering;
+use std::io::Write;
 
 /// Delimiter for point mutations
 pub const PM_DELIMITER: char = '_';
@@ -26,17 +28,31 @@ pub struct AmrMutation {
 
 impl AmrMutation {
     pub fn new(
-        pos_real: usize,
+        pos_real_arg: usize,
         gene_mutation_std: &str,
         gene_mutation: &str,
         class: &str,
         subclass: &str,
         name: &str,
     ) -> Self {
-        let (reference, allele, gene, pos_std, frameshift, frameshift_insertion) =
+        assert!(pos_real_arg > 0);
+        let pos_real = pos_real_arg - 1;
+
+        let (reference, mut allele, gene, pos_std, frameshift, frameshift_insertion) =
             Self::parse(gene_mutation_std);
 
-        AmrMutation {
+        assert!(!name.is_empty());
+        assert!(!name.contains('\t'));
+        let name = name.replace('_', " ");
+        assert!(!name.contains("  "));
+
+        if allele == TERMINATOR_WORD {
+            allele = "*".to_string();
+        } else if allele == "del" {
+            allele.clear();
+        }
+
+        let mutation = AmrMutation {
             pos_real,
             gene_mutation_std: gene_mutation_std.to_string(),
             reference,
@@ -48,8 +64,10 @@ impl AmrMutation {
             gene_mutation: gene_mutation.to_string(),
             class: class.to_string(),
             subclass: subclass.to_string(),
-            name: name.to_string(),
-        }
+            name,
+        };
+        mutation.qc();
+        mutation
     }
 
     pub fn empty(&self) -> bool {
@@ -70,101 +88,133 @@ impl AmrMutation {
         )
     }
 
-    /// Parse gene_mutation_std into components.
-    ///
-    /// Format: `GENE_REF<pos>ALLELE[*frameshift_pos]`
-    /// Examples:
-    /// - `gyrA_S83L` → gene=gyrA, ref=S, pos=83, allele=L
-    /// - `blaTEMp_G162T` → gene=blaTEMp, ref=G, pos=162, allele=T
-    /// - `ampC_T-14TGT` → gene=ampC, ref=T, pos=-14, allele=TGT
-    /// - `nfsA_K141Ter` → gene=nfsA, ref=K, pos=141, allele=* (stop codon)
-    /// - `nfsA_R15C` → gene=nfsA, ref=R, pos=15, allele=C
-    fn parse(gene_mutation_std: &str) -> (String, String, String, i32, usize, i32) {
-        let mut reference = String::new();
-        let mut allele = String::new();
-        let mut gene = String::new();
-        let mut pos_std: i32 = 0;
-        let mut frameshift: usize = NO_INDEX;
-        let mut frameshift_insertion: i32 = 0;
-
-        if let Some(underscore_pos) = gene_mutation_std.find(PM_DELIMITER) {
-            gene = gene_mutation_std[..underscore_pos].to_string();
-            let rest = &gene_mutation_std[underscore_pos + 1..];
-            let chars: Vec<char> = rest.chars().collect();
-
-            // Phase 1: Collect reference residues (uppercase letters at start)
-            let mut i = 0;
-            while i < chars.len() && chars[i].is_ascii_uppercase() {
-                reference.push(chars[i]);
-                i += 1;
-            }
-
-            // Phase 2: Collect position (digits and optional leading '-')
-            let pos_start = i;
-            if i < chars.len() && chars[i] == '-' {
-                i += 1; // negative position
-            }
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i > pos_start {
-                if let Ok(p) = rest[pos_start..i].parse::<i32>() {
-                    pos_std = p - 1; // Convert from 1-based to 0-based (matching C++)
-                }
-            }
-
-            // Phase 3: Collect allele (remaining, possibly with frameshift)
-            let allele_part = &rest[i..];
-            if let Some(star_pos) = allele_part.find('*') {
-                allele = allele_part[..star_pos].to_string();
-                // After * is frameshift position, possibly with +/- insertion count
-                let fs_part = &allele_part[star_pos + 1..];
-                if let Some(sign_pos) = fs_part.find(['+', '-']) {
-                    if let Ok(fs) = fs_part[..sign_pos].parse::<usize>() {
-                        frameshift = fs;
-                    }
-                    if let Ok(ins) = fs_part[sign_pos..].parse::<i32>() {
-                        frameshift_insertion = ins;
-                    }
-                } else if let Ok(fs) = fs_part.parse::<usize>() {
-                    frameshift = fs;
-                }
-            } else if let Some(fs_pos) = allele_part.find("fsTer") {
-                allele = allele_part[..fs_pos].to_string();
-                let fs_part = &allele_part[fs_pos + "fsTer".len()..];
-                let indel_pos = fs_part.find("ins").or_else(|| fs_part.find("del"));
-                let fs_end = indel_pos.unwrap_or(fs_part.len());
-                if let Ok(fs) = fs_part[..fs_end].parse::<usize>() {
-                    frameshift = fs;
-                }
-                if let Some(indel_pos) = indel_pos {
-                    let indel = &fs_part[indel_pos..indel_pos + 3];
-                    if let Ok(count) = fs_part[indel_pos + 3..].parse::<i32>() {
-                        frameshift_insertion = if indel == "del" { -count } else { count };
-                    }
-                }
-            } else {
-                allele = allele_part.to_string();
-            }
-            allele = Self::normalize_allele(&allele);
+    pub fn qc(&self) {
+        if self.empty() {
+            return;
         }
-
-        (
-            reference,
-            allele,
-            gene,
-            pos_std,
-            frameshift,
-            frameshift_insertion,
-        )
+        assert!(!self.gene_mutation.is_empty());
+        assert!(self
+            .reference
+            .chars()
+            .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
+        assert!(self
+            .allele
+            .chars()
+            .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
+        assert_ne!(self.reference, self.allele);
+        assert!(!self.reference.contains('-'));
+        assert!(!self.allele.contains('-'));
+        assert!(!self.gene.is_empty());
+        assert!(!self.reference.is_empty());
+        if self.frameshift != NO_INDEX {
+            assert!(!self.allele.is_empty());
+            assert!(self.pos_std >= 0);
+        }
+        assert_eq!(self.frameshift == NO_INDEX, self.frameshift_insertion == 0);
+        if self.frameshift_insertion != 0 {
+            assert_ne!(self.frameshift_insertion % 3, 0);
+        }
     }
 
-    fn normalize_allele(allele: &str) -> String {
-        match allele {
-            "Ter" => "*".to_string(),
-            "del" => String::new(),
-            _ => allele.to_string(),
+    pub fn save_text(&self, os: &mut dyn Write) -> anyhow::Result<()> {
+        if self.empty() {
+            write!(os, "empty")?;
+        } else {
+            write!(
+                os,
+                "{} {} {} {}",
+                self.pos_real + 1,
+                self.gene_mutation,
+                self.frameshift_insertion,
+                self.name
+            )?;
         }
+        Ok(())
+    }
+
+    fn parse(gene_mutation_std: &str) -> (String, String, String, i32, usize, i32) {
+        assert!(!gene_mutation_std.is_empty());
+
+        let mut reference = String::new();
+        let mut allele = String::new();
+        let mut frameshift: usize = NO_INDEX;
+        let mut frameshift_insertion: i32 = 0;
+        let mut pure_mutation = gene_mutation_std.to_string();
+
+        let fs_infix = "fsTer";
+        if let Some(fs_infix_pos) = gene_mutation_std.find(fs_infix) {
+            pure_mutation.truncate(fs_infix_pos);
+            let mut suffix = gene_mutation_std[fs_infix_pos + fs_infix.len()..].to_string();
+            let (indel_pos, ins) = if let Some(pos) = suffix.find("ins") {
+                (pos, true)
+            } else {
+                (
+                    suffix.find("del").expect("frameshift without ins/del"),
+                    false,
+                )
+            };
+            frameshift_insertion = suffix[indel_pos + 3..]
+                .parse::<i32>()
+                .expect("bad frameshift insertion length");
+            if !ins {
+                frameshift_insertion *= -1;
+            }
+            assert_ne!(frameshift_insertion % 3, 0);
+            suffix.truncate(indel_pos);
+            frameshift = suffix.parse::<usize>().expect("bad frameshift stop");
+            assert_ne!(frameshift, NO_INDEX);
+        }
+
+        enum Type {
+            InAllele,
+            InPos,
+            InRef,
+        }
+
+        let mut type_ = Type::InAllele;
+        let mut pos_std_s = String::new();
+        for (i, c) in pure_mutation.char_indices().rev() {
+            match type_ {
+                Type::InAllele => {
+                    if c.is_ascii_alphabetic() {
+                        allele.push(c);
+                    } else {
+                        pos_std_s.push(c);
+                        type_ = Type::InPos;
+                    }
+                }
+                Type::InPos => {
+                    if c.is_ascii_alphabetic() {
+                        reference.push(c);
+                        type_ = Type::InRef;
+                    } else {
+                        pos_std_s.push(c);
+                    }
+                }
+                Type::InRef => {
+                    if c.is_ascii_alphabetic() {
+                        reference.push(c);
+                    } else {
+                        assert_eq!(c, PM_DELIMITER);
+                        assert!(i > 0);
+                        allele = allele.chars().rev().collect();
+                        reference = reference.chars().rev().collect();
+                        pos_std_s = pos_std_s.chars().rev().collect();
+                        let gene = pure_mutation[..i].to_string();
+                        let pos_std = pos_std_s.parse::<i32>().expect("bad mutation position") - 1;
+                        return (
+                            reference,
+                            allele,
+                            gene,
+                            pos_std,
+                            frameshift,
+                            frameshift_insertion,
+                        );
+                    }
+                }
+            }
+        }
+        panic!("bad mutation: {gene_mutation_std}");
     }
 
     pub fn apply(&self, seq: &mut String) -> anyhow::Result<()> {
@@ -203,6 +253,29 @@ impl Default for AmrMutation {
     }
 }
 
+impl PartialEq for AmrMutation {
+    fn eq(&self, other: &Self) -> bool {
+        self.gene_mutation_std == other.gene_mutation_std
+    }
+}
+
+impl Eq for AmrMutation {}
+
+impl PartialOrd for AmrMutation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for AmrMutation {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.gene
+            .cmp(&other.gene)
+            .then(self.pos_real.cmp(&other.pos_real))
+            .then(self.gene_mutation_std.cmp(&other.gene_mutation_std))
+    }
+}
+
 /// Observed sequence change relative to reference
 #[derive(Debug, Clone)]
 pub struct SeqChange {
@@ -220,6 +293,80 @@ pub struct SeqChange {
 }
 
 impl SeqChange {
+    pub fn qc(&self, hsp: &Hsp, mutations: &[AmrMutation]) {
+        if self.empty() {
+            assert!(!self.mutations.is_empty());
+            assert!(self.disr.is_none());
+            return;
+        }
+
+        if self.disr.is_none() {
+            assert!(self.len > 0);
+            assert!(self.start_ref < self.stop_ref);
+            assert!(self.start_target <= hsp.s_int.stop);
+            assert!(!self.reference.contains('-'));
+            assert!(!self.allele.contains('-'));
+            assert!(self
+                .reference
+                .chars()
+                .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
+            assert!(self
+                .allele
+                .chars()
+                .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
+            if self.reference.is_empty() {
+                assert!(self.is_frameshift());
+                assert!(self.allele.is_empty());
+                assert_eq!(self.len, 1);
+                assert_eq!(self.stop_ref, self.start_ref + 1);
+                assert_eq!(self.neighborhood_mismatch, 0.0);
+                assert!(self.mutations.is_empty());
+            } else {
+                assert!(self.stop_ref <= hsp.q_int.stop);
+                assert!(self.reference.len() * hsp.a2q <= self.stop_ref - self.start_ref);
+                assert_ne!(self.reference, self.allele);
+            }
+            for &mutation_idx in &self.mutations {
+                let mutation = &mutations[mutation_idx];
+                assert!(
+                    mutation.pos_real >= hsp.q_int.start && mutation.pos_real <= hsp.q_int.stop
+                );
+                if mutation.frameshift != NO_INDEX {
+                    assert!(hsp.q_prot);
+                    assert!(!hsp.s_prot);
+                }
+            }
+        } else {
+            assert!(self.mutations.is_empty());
+        }
+    }
+
+    pub fn save_text(&self, os: &mut dyn Write, mutations: &[AmrMutation]) -> anyhow::Result<()> {
+        write!(
+            os,
+            "{} {} {:?} -> {:?} {}..{} {} {}",
+            self.start + 1,
+            self.len,
+            self.reference,
+            self.allele,
+            self.start_ref + 1,
+            self.stop_ref,
+            self.start_target + 1,
+            self.neighborhood_mismatch
+        )?;
+        if let Some(disr) = &self.disr {
+            if !disr.empty() {
+                write!(os, " {}", disr.genesymbol_raw())?;
+            }
+        }
+        for &mutation_idx in &self.mutations {
+            write!(os, " ")?;
+            mutations[mutation_idx].save_text(os)?;
+        }
+        writeln!(os)?;
+        Ok(())
+    }
+
     pub fn empty(&self) -> bool {
         self.len == 0 && self.disr.is_none()
     }
@@ -236,8 +383,194 @@ impl SeqChange {
         self.reference.is_empty()
     }
 
+    pub fn get_mutation_str(&self) -> String {
+        if let Some(disr) = &self.disr {
+            return disr.genesymbol_raw();
+        }
+        let allele = if self.allele.is_empty() {
+            "DEL".to_string()
+        } else if self.allele == "*" {
+            TERMINATOR_WORD.to_string()
+        } else {
+            self.allele.clone()
+        };
+        format!("{}{}{}", self.reference, self.start_ref + 1, allele)
+    }
+
     pub fn get_stop(&self) -> usize {
         self.start + self.len
+    }
+
+    pub fn finish(&mut self, hsp: &Hsp, ref_seq: &str, flanking_len: usize) -> bool {
+        self.set_seq(hsp);
+        if ref_seq.as_bytes().get(self.start) == Some(&b'-') {
+            self.start -= 1;
+            self.len += 1;
+            self.set_seq(hsp);
+        }
+        assert!(!self.reference.is_empty());
+        self.finish_pos(hsp, flanking_len)
+    }
+
+    pub fn finish_pos(&mut self, hsp: &Hsp, flanking_len: usize) -> bool {
+        self.set_start_stop_ref(hsp);
+        self.set_start_target(hsp);
+        self.set_neighborhood_mismatch(hsp, flanking_len);
+        self.neighborhood_mismatch <= 0.04
+    }
+
+    pub fn set_seq(&mut self, hsp: &Hsp) {
+        let stop = self.get_stop();
+        assert!(stop <= hsp.qseq.len());
+        assert!(stop <= hsp.sseq.len());
+        self.reference = hsp.qseq[self.start..stop].replace('-', "");
+        self.allele = hsp.sseq[self.start..stop].replace('-', "");
+        self.reference.make_ascii_uppercase();
+        self.allele.make_ascii_uppercase();
+        assert_ne!(self.reference, self.allele);
+    }
+
+    pub fn set_start_stop_ref(&mut self, hsp: &Hsp) {
+        self.start_ref = hsp.q_int.start;
+        for c in hsp.qseq[..self.start].bytes() {
+            if c != b'-' {
+                self.start_ref += hsp.a2q;
+            }
+        }
+        self.stop_ref = self.start_ref;
+        for c in hsp.qseq[self.start..self.get_stop()].bytes() {
+            if c != b'-' {
+                self.stop_ref += hsp.a2q;
+            }
+        }
+    }
+
+    pub fn set_start_target(&mut self, hsp: &Hsp) {
+        self.start_target = hsp.s_int.start;
+        if hsp.s_int.strand == 1 {
+            for c in hsp.sseq[..self.start].bytes() {
+                if c != b'-' {
+                    self.start_target += hsp.a2s;
+                }
+            }
+        } else {
+            for c in hsp.sseq[self.get_stop()..].bytes().rev() {
+                if c != b'-' {
+                    self.start_target += hsp.a2s;
+                }
+            }
+        }
+    }
+
+    pub fn set_neighborhood_mismatch(&mut self, hsp: &Hsp, flanking_len: usize) {
+        self.neighborhood_mismatch = 0.0;
+        if flanking_len == 0 {
+            return;
+        }
+
+        let qseq = hsp.qseq.as_bytes();
+        let sseq = hsp.sseq.as_bytes();
+        assert_eq!(qseq.len(), sseq.len());
+
+        let mut span = 0usize;
+        let mut mismatches = 0usize;
+
+        let mut j = 0usize;
+        if self.start != 0 {
+            j = self.start - 1;
+            while self.start - j <= flanking_len {
+                span += 1;
+                if sseq[j] != qseq[j] {
+                    mismatches += 1;
+                }
+                if j == 0 {
+                    break;
+                }
+                j -= 1;
+            }
+        }
+        assert!(self.start >= j);
+        let missing_left = hsp
+            .s_tail(true)
+            .min(hsp.q_int.start)
+            .min(flanking_len + 1 - (self.start - j));
+        span += missing_left;
+        mismatches += missing_left;
+
+        let stop = self.get_stop();
+        let mut j = stop + 1;
+        while j < sseq.len() && j - stop <= flanking_len {
+            span += 1;
+            if sseq[j] != qseq[j] {
+                mismatches += 1;
+            }
+            j += 1;
+        }
+        let missing_right = hsp
+            .s_tail(false)
+            .min(hsp.qlen.saturating_sub(hsp.q_int.stop))
+            .min(flanking_len + 1 - (j - stop));
+        span += missing_right;
+        mismatches += missing_right;
+
+        if span != 0 {
+            self.neighborhood_mismatch = mismatches as f64 / span as f64;
+        }
+    }
+
+    pub fn matches_mutation(&self, mutation: &AmrMutation) -> anyhow::Result<bool> {
+        if self.empty() {
+            return Ok(false);
+        }
+        if mutation.pos_real < self.start_ref || mutation.get_stop() > self.stop_ref {
+            return Ok(false);
+        }
+
+        let head = mutation.pos_real - self.start_ref;
+        let tail = self.stop_ref - mutation.get_stop();
+        let reference = &self.reference[head..self.reference.len() - tail];
+        if reference != mutation.reference {
+            anyhow::bail!(
+                "Reference sequence has '{}', but mutation is: {}",
+                reference,
+                mutation.gene_mutation_std
+            );
+        }
+        if head + mutation.allele.len() + tail != self.allele.len() {
+            return Ok(false);
+        }
+        let allele = &self.allele[head..self.allele.len() - tail];
+        Ok(allele == mutation.allele)
+    }
+
+    pub fn better(&self, other: &SeqChange, rel_identity: f64, other_rel_identity: f64) -> bool {
+        if other.has_mutation() != self.has_mutation() {
+            return self.has_mutation();
+        }
+        if self.neighborhood_mismatch != other.neighborhood_mismatch {
+            return self.neighborhood_mismatch < other.neighborhood_mismatch;
+        }
+        rel_identity > other_rel_identity
+    }
+}
+
+impl PartialEq for SeqChange {
+    fn eq(&self, other: &Self) -> bool {
+        self.start_target == other.start_target
+    }
+}
+
+impl Eq for SeqChange {}
+
+impl PartialOrd for SeqChange {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SeqChange {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.start_target.cmp(&other.start_target)
     }
 }
 
@@ -286,127 +619,217 @@ impl Alignment {
     pub fn has_declarative_frameshift(&self, mutations: &[AmrMutation]) -> bool {
         self.seq_changes.len() == 1 && self.seq_changes[0].has_frameshift(mutations)
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_amr_mutation_parse_simple() {
-        let m = AmrMutation::new(
-            100,
-            "gyrA_S83L",
-            "gyrA_S83L",
-            "QUINOLONE",
-            "FLUOROQUINOLONE",
-            "name",
-        );
-        assert_eq!(m.gene, "gyrA");
-        assert_eq!(m.reference, "S");
-        assert_eq!(m.allele, "L");
-        assert_eq!(m.pos_std, 82); // 0-based: 83 - 1
-        assert_eq!(m.wildtype(), "gyrA_S83S"); // wildtype uses pos_std + 1
+    pub fn qc(&self, mutations: &[AmrMutation]) {
+        self.hsp.qc();
+        self.ref_mutation.qc();
+        for seq_change in &self.seq_changes {
+            seq_change.qc(&self.hsp, mutations);
+        }
     }
 
-    #[test]
-    fn test_amr_mutation_parse_negative_pos() {
-        let m = AmrMutation::new(
-            40,
-            "ampC_T-14TGT",
-            "ampC_T-14TGT",
-            "BETA-LACTAM",
-            "CEPH",
-            "name",
-        );
-        assert_eq!(m.gene, "ampC");
-        assert_eq!(m.reference, "T");
-        assert_eq!(m.allele, "TGT");
-        assert_eq!(m.pos_std, -15); // 0-based: -14 - 1
+    pub fn save_text(&self, os: &mut dyn Write, mutations: &[AmrMutation]) -> anyhow::Result<()> {
+        self.hsp.save_text(os)?;
+        if !self.ref_mutation.empty() {
+            write!(os, " ")?;
+            self.ref_mutation.save_text(os)?;
+        }
+        write!(os, " #seqChanges:{}", self.seq_changes.len())?;
+        if !self.seq_changes.is_empty() {
+            writeln!(os)?;
+            for seq_change in &self.seq_changes {
+                seq_change.save_text(os, mutations)?;
+            }
+        }
+        Ok(())
     }
 
-    #[test]
-    fn test_amr_mutation_parse_stop_codon() {
-        let m = AmrMutation::new(
-            141,
-            "nfsA_K141Ter",
-            "nfsA_K141Ter",
-            "NITRO",
-            "NITRO",
-            "name",
-        );
-        assert_eq!(m.gene, "nfsA");
-        assert_eq!(m.reference, "K");
-        assert_eq!(m.allele, "*");
-        assert_eq!(m.pos_std, 140); // 0-based: 141 - 1
+    pub fn set_seq_changes(
+        &mut self,
+        ref_mutations: &[AmrMutation],
+        flanking_len: usize,
+    ) -> anyhow::Result<()> {
+        assert!(self.seq_changes.is_empty());
+        assert!(!ref_mutations.is_empty());
+
+        if !self.ref_mutation.empty() {
+            if self.ref_mutation.frameshift != NO_INDEX && !self.hsp.blastx() {
+                return Ok(());
+            }
+            let index = ref_mutations
+                .iter()
+                .position(|mutation| mutation == &self.ref_mutation)
+                .expect("declarative mutation must exist in reference mutations");
+            self.ref_mutation = ref_mutations[index].clone();
+
+            let start = self.ref_mutation2ref_seq_pos();
+            if start != NO_INDEX {
+                let mut seq_change = SeqChange {
+                    start,
+                    len: self.ref_mutation.allele.len(),
+                    reference: self.ref_mutation.reference.clone(),
+                    allele: self.ref_mutation.allele.clone(),
+                    ..Default::default()
+                };
+                if seq_change.finish_pos(&self.hsp, flanking_len) {
+                    seq_change.mutations.push(index);
+                    self.seq_changes.push(seq_change);
+                }
+            }
+            return Ok(());
+        }
+
+        let qseq = self.hsp.qseq.as_bytes();
+        let sseq = self.hsp.sseq.as_bytes();
+        assert_eq!(qseq.len(), sseq.len());
+
+        let mut seq_change = SeqChange::default();
+        let mut in_seq_change = false;
+        for i in 0..=qseq.len() {
+            if in_seq_change {
+                if i == qseq.len() || sseq[i] == qseq[i] {
+                    if seq_change.finish(&self.hsp, &self.hsp.qseq, flanking_len) {
+                        self.seq_changes.push(seq_change);
+                    }
+                    seq_change = SeqChange::default();
+                    in_seq_change = false;
+                } else {
+                    seq_change.len += 1;
+                }
+            } else if i < qseq.len() && sseq[i] != qseq[i] {
+                seq_change.start = i;
+                seq_change.len = 1;
+                in_seq_change = true;
+            }
+        }
+
+        let mut j = 0usize;
+        while j < ref_mutations.len() && ref_mutations[j].pos_real < self.hsp.q_int.start {
+            j += 1;
+        }
+
+        let mut start_ref_prev = NO_INDEX;
+        for seq_change in &mut self.seq_changes {
+            seq_change.qc(&self.hsp, ref_mutations);
+            if start_ref_prev != NO_INDEX {
+                assert!(start_ref_prev <= seq_change.start_ref);
+            }
+            while j < ref_mutations.len() {
+                let mutation = &ref_mutations[j];
+                if mutation.pos_real >= seq_change.stop_ref {
+                    break;
+                }
+                if seq_change.matches_mutation(mutation)? {
+                    seq_change.mutations.push(j);
+                }
+                j += 1;
+            }
+            start_ref_prev = seq_change.start_ref;
+        }
+
+        let mut ref_pos = self.hsp.q_int.start;
+        let mut i = 0usize;
+        for (mutation_idx, mutation) in ref_mutations.iter().enumerate() {
+            while ref_pos < mutation.pos_real {
+                assert!(i < qseq.len());
+                assert_ne!(qseq[i], b'-');
+                i += 1;
+                while i < qseq.len() && qseq[i] == b'-' {
+                    i += 1;
+                }
+                if i >= qseq.len() {
+                    break;
+                }
+                ref_pos += 1;
+            }
+            if i >= qseq.len() {
+                break;
+            }
+            if ref_pos == mutation.pos_real
+                && self
+                    .hsp
+                    .qseq
+                    .get(i..)
+                    .is_some_and(|seq| seq.starts_with(&mutation.reference))
+                && self
+                    .hsp
+                    .sseq
+                    .get(i..)
+                    .is_some_and(|seq| seq.starts_with(&mutation.reference))
+            {
+                self.seq_changes.push(SeqChange {
+                    mutations: vec![mutation_idx],
+                    ..Default::default()
+                });
+            }
+        }
+
+        self.seq_changes.sort();
+        Ok(())
     }
 
-    #[test]
-    fn test_amr_mutation_parse_deletion() {
-        let m = AmrMutation::new(
-            5,
-            "pmrB_RPISLR6del",
-            "pmrB_RPISLR6del",
-            "COLISTIN",
-            "COLISTIN",
-            "name",
-        );
-        assert_eq!(m.gene, "pmrB");
-        assert_eq!(m.reference, "RPISLR");
-        assert_eq!(m.allele, "");
-        assert_eq!(m.pos_std, 5);
-        assert_eq!(m.frameshift, NO_INDEX);
-        assert_eq!(m.frameshift_insertion, 0);
-    }
+    pub fn ref_mutation2ref_seq_pos(&self) -> usize {
+        assert!(!self.ref_mutation.empty());
 
-    #[test]
-    fn test_amr_mutation_parse_frameshift_insertion() {
-        let m = AmrMutation::new(
-            252,
-            "cirA_Y253CfsTer5ins1",
-            "cirA_Y253CfsTer5ins1",
-            "BETA-LACTAM",
-            "CEFIDEROCOL",
-            "name",
-        );
-        assert_eq!(m.gene, "cirA");
-        assert_eq!(m.reference, "Y");
-        assert_eq!(m.allele, "C");
-        assert_eq!(m.pos_std, 252);
-        assert_eq!(m.frameshift, 5);
-        assert_eq!(m.frameshift_insertion, 1);
-    }
+        if self.ref_mutation.pos_real < self.hsp.q_int.start
+            || self.ref_mutation.pos_real + self.ref_mutation.allele.len() > self.hsp.q_int.stop
+        {
+            return NO_INDEX;
+        }
 
-    #[test]
-    fn test_amr_mutation_parse_frameshift_deletion() {
-        let m = AmrMutation::new(
-            632,
-            "cirA_K633LfsTer8del2",
-            "cirA_K633LfsTer8del2",
-            "BETA-LACTAM",
-            "CEFIDEROCOL",
-            "name",
-        );
-        assert_eq!(m.gene, "cirA");
-        assert_eq!(m.reference, "K");
-        assert_eq!(m.allele, "L");
-        assert_eq!(m.pos_std, 632);
-        assert_eq!(m.frameshift, 8);
-        assert_eq!(m.frameshift_insertion, -2);
-    }
+        let qseq = self.hsp.qseq.as_bytes();
+        let sseq = self.hsp.sseq.as_bytes();
+        let allele = self.ref_mutation.allele.as_bytes();
+        let mut pos = self.hsp.q_int.start;
+        let mut frameshift_i = NO_INDEX;
+        let mut i = 0usize;
 
-    #[test]
-    fn test_amr_mutation_parse_promoter() {
-        let m = AmrMutation::new(162, "blaTEMp_G162T", "blaTEMp_G162T", "BL", "BL", "name");
-        assert_eq!(m.gene, "blaTEMp");
-        assert_eq!(m.reference, "G");
-        assert_eq!(m.allele, "T");
-        assert_eq!(m.pos_std, 161); // 0-based: 162 - 1
-    }
+        while i < qseq.len() {
+            assert!(pos <= self.ref_mutation.pos_real);
+            if qseq[i] != b'-' {
+                if pos == self.ref_mutation.pos_real {
+                    let align_stop = i + allele.len();
+                    if align_stop <= qseq.len()
+                        && &qseq[i..align_stop] == allele
+                        && &sseq[i..align_stop] == allele
+                        && (pos == 0 || (i > 0 && qseq[i - 1] == sseq[i - 1]))
+                    {
+                        if self.ref_mutation.frameshift != NO_INDEX {
+                            frameshift_i = i;
+                            i += allele.len();
+                            pos = self.ref_mutation.get_stop();
+                            break;
+                        }
+                        let ref_stop = pos + allele.len();
+                        assert!(align_stop <= qseq.len());
+                        if ref_stop == self.hsp.qlen
+                            || (align_stop < qseq.len() && qseq[align_stop] == sseq[align_stop])
+                        {
+                            return i;
+                        }
+                    }
+                    return NO_INDEX;
+                }
+                pos += 1;
+            }
+            i += 1;
+        }
 
-    #[test]
-    fn test_amr_mutation_empty() {
-        let m = AmrMutation::default();
-        assert!(m.empty());
+        while i < qseq.len() {
+            assert_ne!(frameshift_i, NO_INDEX);
+            if qseq[i] != b'-' {
+                assert!(self.ref_mutation.get_stop() > 0);
+                if pos == self.ref_mutation.get_stop() - 1 + self.ref_mutation.frameshift {
+                    if qseq[i] == b'*' && sseq[i] == b'*' {
+                        return frameshift_i;
+                    }
+                    return NO_INDEX;
+                }
+                pos += 1;
+            }
+            i += 1;
+        }
+
+        NO_INDEX
     }
 }

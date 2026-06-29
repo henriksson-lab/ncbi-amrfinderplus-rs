@@ -2,6 +2,7 @@
 
 A Rust translation of [NCBI AMRFinderPlus](https://github.com/ncbi/amr) (v4.2.7) for identifying antimicrobial resistance (AMR) genes and point mutations in bacterial protein and nucleotide sequences.
 
+* 2026-06-29: New audit, many changes. **Needs BLAST which isn't functional yet. Do not use**
 * 2026-04-27: Crate passes tests and appears functional. Use on your own risk as bugs may still remain
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
@@ -32,9 +33,7 @@ But:
 - **Protein analysis** -- BLASTP and HMM-based AMR gene detection
 - **Nucleotide analysis** -- translated BLAST (BLASTX/TBLASTN) for assembled contigs
 - **Point mutations** -- organism-specific resistance mutation detection (protein and DNA level)
-- **Library API** -- all functionality available as Rust library functions; no file I/O required
 - **Single binary** -- all tools consolidated into one binary with subcommands
-- **Pure Rust HMM** -- in-process HMM search via `hmmer-pure-rs` (no external hmmsearch needed)
 - **Parallel execution** -- BLAST and HMM searches run concurrently
 
 ## Installation
@@ -194,7 +193,7 @@ amrfinder-rs = "0.1"
 ### Validate a FASTA file
 
 ```rust
-use amrfinder::fasta_utils::{fasta_check, FastaCheckOpts};
+use amrfinder::fasta_check::{fasta_check, FastaCheckOpts};
 use std::path::Path;
 
 let (num_seqs, max_len, total_len) = fasta_check(&FastaCheckOpts {
@@ -234,7 +233,7 @@ for locus in loci {
 ### Load the AMR family database
 
 ```rust
-use amrfinder::report::Batch;
+use amrfinder::amr_report::Batch;
 use std::path::Path;
 
 let mut batch = Batch::from_fam_file(Path::new("db/fam.tsv"), 0).unwrap();
@@ -251,7 +250,7 @@ println!("Type: {} / {}", fam.type_, fam.subtype);
 ### Parse BLAST results
 
 ```rust
-use amrfinder::report::{BlastAlignment, BlastRule};
+use amrfinder::amr_report::{BlastAlignment, BlastRule};
 
 let line = "WP_061158039.1|1|1|blaTEM-156|blaTEM|hydrolase|2|BETA-LACTAM|BETA-LACTAM|class_A_beta-lactamase_TEM-156\tmy_protein\t1\t286\t287\t1\t286\t286\tMSIQH...\tMSIQH...";
 
@@ -269,75 +268,17 @@ println!("Identity: {:.1}%", al.hsp.rel_identity() * 100.0);
 println!("Coverage: {:.1}%", al.hsp.q_rel_coverage() * 100.0);
 ```
 
-### Run the full pipeline programmatically
-
-Minimum required builder inputs are:
-
-- `.database(...)`
-- at least one of `.protein(...)` or `.nucleotide(...)`
-
-Everything else uses AMRFinder-compatible defaults: `threads(4)`, `coverage_min(0.5)`, `ident_min(-1.0)`, `translation_table(11)`, `annotation_format("genbank")`, plus reporting disabled, hierarchy node output disabled, and no mutation-all side file.
-
-Minimal protein input:
-
-```rust
-use amrfinder::AmrFinder;
-
-let run = AmrFinder::builder()
-    .protein("proteins.fa")
-    .database("db")
-    .run()
-    .unwrap();
-
-println!("{}", run.report);
-```
-
-Nucleotide input with organism-specific mutation detection:
-
-```rust
-use amrfinder::AmrFinder;
-
-let run = AmrFinder::builder()
-    .nucleotide("contigs.fa")
-    .database("db")
-    .organism("Escherichia")
-    .run()
-    .unwrap();
-
-println!("{}", run.report);
-```
-
-Fuller example with common optional settings:
-
-```rust
-use amrfinder::AmrFinder;
-
-let run = AmrFinder::builder()
-    .protein("proteins.fa")
-    .nucleotide("contigs.fa")
-    .gff("annotations.gff")
-    .database("db")
-    .organism("Escherichia")
-    .plus(true)
-    .print_node(true)
-    .threads(8)
-    .mutation_all("mutation_all.tsv")
-    .run()
-    .unwrap();
-
-println!("{}", run.report);
-```
-
 ### Run amr_report directly
 
 ```rust
-use amrfinder::amr_reportcli::{AmrReportConfig, run_amr_report};
+use amrfinder::amr_report::{run_amr_report, AmrReportConfig};
 use std::path::Path;
 
 let config = AmrReportConfig {
     fam_file: Path::new("db/fam.tsv"),
     blastp_file: Some(Path::new("blastp_results.tsv")),
     blastx_file: None,
+    dna_len_file: None,
     hmmsearch_file: Some(Path::new("hmmsearch.tblout")),
     hmmdom_file: Some(Path::new("hmmsearch.domtblout")),
     gff_file: Some(Path::new("annotations.gff")),
@@ -350,7 +291,9 @@ let config = AmrReportConfig {
     ident_min: -1.0,
     print_node: false,
     mutation_all: None,
+    name: "",
     report_core_only: false,
+    report_all_equal: false,
     cds_exist: true,
 };
 
@@ -360,35 +303,21 @@ let report = String::from_utf8(output).unwrap();
 println!("{}", report);
 ```
 
-### Run HMM search in-process (no external hmmsearch)
-
-```rust
-use amrfinder::search::run_hmmsearch_library;
-use std::path::Path;
-
-run_hmmsearch_library(
-    Path::new("db/AMR.LIB"),       // HMM database (must be hmmpress'd)
-    Path::new("proteins.fa"),       // Query FASTA
-    Path::new("hmmsearch.tblout"),  // Output tblout
-    Path::new("hmmsearch.domtblout"), // Output domtblout
-).unwrap();
-```
-
 ### DNA mutation detection
 
 ```rust
-use amrfinder::dna_mutation::run_dna_mutation;
+use amrfinder::dna_mutation::body;
 use std::path::Path;
 
 let mut output = Vec::new();
-run_dna_mutation(
+body(
     Path::new("blastn_results.tsv"),
     Path::new("db/AMR_DNA-Escherichia.tsv"),
     "Escherichia",
+    None,   // mutation_all output file
+    "",     // input name
     false,  // print_node
-    "",     // name
     &mut output,
-    None,   // mutation_all output
 ).unwrap();
 ```
 
@@ -450,31 +379,27 @@ The total runtime is dominated by BLAST (external, 1.5 s) and HMM (pure Rust lib
 
 ```
 amrfinder/src/
-    main.rs           (294 lines)  CLI entry point with clap subcommands
-    pipeline.rs       (740 lines)  Orchestrator: parallel BLAST+HMM, report, post-processing
-    report.rs        (1123 lines)  FAM hierarchy, BlastAlignment, filtering pipeline, TSV output
-    amr_reportcli.rs  (458 lines)  BLAST/HMM file parsing, report driver
-    dna_mutation.rs   (338 lines)  DNA-level point mutation detection
-    search.rs          (85 lines)  In-process HMM search via hmmer-pure-rs
-    seq.rs            (631 lines)  Hsp, Interval, Disruption, IUPAC matching
-    gff.rs            (659 lines)  GFF and BED annotation parsing
-    fasta_utils.rs    (589 lines)  FASTA validation, extraction, splitting
-    alignment.rs      (269 lines)  AmrMutation, SeqChange, Alignment
-    tsv.rs            (326 lines)  TSV I/O (TsvOut writer, TextTable reader)
-    graph.rs          (287 lines)  Directed graph with Tarjan's SCC algorithm
-    columns.rs         (34 lines)  Output column name constants
-    update.rs          (58 lines)  Database download via ureq (replaces libcurl)
-    lib.rs             (13 lines)  Module exports
-                     -----------
-                     5904 lines total
+    main.rs              CLI entry point with clap subcommands
+    amrfinder.rs         Orchestrator: BLAST+HMM, report, post-processing
+    amr_report.rs        FAM hierarchy, BlastAlignment, filtering pipeline, TSV output
+    dna_mutation.rs      DNA-level point mutation detection
+    seq.rs               Hsp, Interval, Disruption, IUPAC matching
+    gff.rs               GFF and BED annotation parsing
+    fasta_check.rs       FASTA validation
+    fasta_extract.rs     FASTA extraction
+    fasta2parts.rs       FASTA splitting
+    alignment.rs         AmrMutation, SeqChange, Alignment
+    tsv.rs               TSV I/O (TsvOut writer, TextTable reader)
+    graph.rs             Directed graph with Tarjan's SCC algorithm
+    columns.rs           Output column name constants
+    amrfinder_update.rs  Database download and indexing
+    lib.rs               Module exports
 ```
 
 ### Dependencies
 
 | Crate | Purpose |
 |-------|---------|
-| `hmmer-pure-rs` | Pure Rust HMM search (replaces external hmmsearch) |
-| `blast-rs` | BLAST database I/O |
 | `ureq` | HTTP client for database downloads (replaces libcurl) |
 | `clap` | CLI argument parsing |
 | `anyhow` | Error handling |
