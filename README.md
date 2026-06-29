@@ -345,35 +345,36 @@ println!("Identity: {:.1}%", hsp.rel_identity() * 100.0);
 
 ## Benchmarks
 
-**Test data:** AMRFinderPlus standard test suite (17 protein sequences across 18 contigs).
-**Hardware:** Benchmarked on the same machine, 6 threads, native CPU target.
+Benchmarked on 2026-06-29 against the checked-in original C++ AMRFinderPlus v4.2.7 binaries in `amr/` and Rust release binaries built with:
 
-### End-to-end pipeline (protein input)
+```bash
+CARGO_TARGET_DIR=/tmp/ncbi-amrfinderplus-rs-target-bench cargo build --release --bins
+```
 
-| | C++ (v4.2.7) | Rust | Notes |
-|---|---|---|---|
-| **Total time** | 3.45 s | 4.23 s | Rust is 1.2x slower |
-| BLAST + HMM (parallel) | ~3.3 s | ~3.3 s | Same external tools |
-| Orchestration overhead | ~0.15 s | ~0.9 s | Rust calls C++ amr_report |
+BLAST-dependent full-pipeline parity and speed are intentionally not reported here because BLAST is currently not functional in this translation. These numbers cover non-BLAST-runtime paths only. Repeated-run timings include process startup cost.
 
-The total runtime is dominated by BLAST (external, 1.5 s) and HMM (pure Rust library, ~3.9 s) searches, which run in parallel.
+### Non-BLAST utility comparisons
 
-### Component benchmarks
+| Case | Reps | Parity | C++ ms/run | Rust ms/run | Rust time vs C++ | C++ RSS | Rust RSS |
+|---|---:|---|---:|---:|---:|---:|---:|
+| `fasta_check` protein | 300 | pass | 7.03 | 4.43 | 0.63x | 4160 KB | 2880 KB |
+| `fasta_check` DNA | 300 | pass | 9.60 | 4.70 | 0.49x | 4160 KB | 2880 KB |
+| `fasta_extract` DNA | 300 | pass | 6.07 | 4.07 | 0.67x | 4160 KB | 2880 KB |
+| `mutate` protein | 300 | pass | 6.20 | 3.97 | 0.64x | 4480 KB | 2880 KB |
+| `dna_mutation` from checked-in BLASTN fixture | 100 | pass | 9.80 | 17.30 | 1.77x | 5120 KB | 2880 KB |
 
-| Component | C++ | Rust | Speedup |
-|-----------|-----|------|---------|
-| `fasta_check` (17 proteins) | 7 ms | 5 ms | **1.4x faster** |
-| `amr_report` (7647 BLAST + 24 HMM hits) | 161 ms | n/a | -- |
-| `blastp` (external, 6 threads) | 1.5 s | 1.5 s | same |
-| `hmmsearch` (library / external) | 3.9 s | ~3.9 s | pure Rust library |
+Parity means byte-identical stdout/stderr with original progress output disabled via `-noprogress` where applicable. For `dna_mutation`, the `mutation_all` output was also byte-identical.
 
-### Accuracy
+### AMRFinder front-end metadata paths
 
-| Test case | Match? |
-|-----------|--------|
-| Protein (`test_prot.fa` + GFF) | Byte-identical to C++ |
-| DNA BLASTX/BLASTP/HMM results | Identical |
-| DNA point mutations (POINTN) | Rust dna_mutation module available |
+These paths do not invoke BLAST.
+
+| Case | Reps | C++ total | Rust total | C++ RSS | Rust RSS |
+|---|---:|---:|---:|---:|---:|
+| Database version (`-V`) | 200 | 1.31 s | 2.36 s | 4480 KB | 9920 KB |
+| List organisms (`--list_organisms`) | 200 | 2.88 s | 3.66 s | 5120 KB | 10560 KB |
+
+Raw output is not byte-identical for these metadata paths because the original C++ binary prints `Running: ...`, completion timing, and its own software directory. After normalizing those diagnostic/path differences, the database version and organism list content matched.
 
 ## Architecture
 
